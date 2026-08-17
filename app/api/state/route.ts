@@ -1,4 +1,6 @@
 import { ensureDatabase, getD1 } from "../../../db/bootstrap";
+import { parseJd } from "../../../lib/jd-parser";
+import { runTask } from "../../../lib/pipeline";
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string") return fallback;
@@ -25,6 +27,10 @@ function normalizeTask(row: Record<string, unknown>) {
     discovered: row.discovered,
     highValue: row.high_value,
     lastRunAt: row.last_run_at,
+    authorBlacklist: parseJson(row.author_blacklist, []),
+    companyBlacklist: parseJson(row.company_blacklist, []),
+    scheduleEnabled: row.schedule_enabled !== 0,
+    nextRunAt: row.next_run_at,
   };
 }
 
@@ -78,15 +84,24 @@ function normalizeSource(row: Record<string, unknown>) {
   };
 }
 
+function normalizeConnectorJob(row: Record<string, unknown>) {
+  return {
+    id: row.id, taskId: row.task_id, source: row.source, status: row.status,
+    dispatchedAt: row.dispatched_at, completedAt: row.completed_at,
+    fetched: row.fetched, error: row.error,
+  };
+}
+
 export async function GET() {
   try {
     await ensureDatabase();
     const db = getD1();
-    const [taskRows, leadRows, runRows, sourceRows] = await Promise.all([
-      db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all(),
+    const [taskRows, leadRows, runRows, sourceRows, connectorRows] = await Promise.all([
+      db.prepare("SELECT t.*, f.author_blacklist, f.company_blacklist, f.schedule_enabled, f.next_run_at FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id ORDER BY t.created_at DESC").all(),
       db.prepare("SELECT * FROM leads ORDER BY score DESC, published_at DESC").all(),
       db.prepare("SELECT * FROM runs ORDER BY started_at DESC LIMIT 30").all(),
       db.prepare("SELECT * FROM sources ORDER BY name").all(),
+      db.prepare("SELECT * FROM connector_jobs ORDER BY dispatched_at DESC LIMIT 50").all(),
     ]);
 
     return Response.json({
@@ -94,6 +109,7 @@ export async function GET() {
       leads: leadRows.results.map((row) => normalizeLead(row as Record<string, unknown>)),
       runs: runRows.results.map((row) => normalizeRun(row as Record<string, unknown>)),
       sources: sourceRows.results.map((row) => normalizeSource(row as Record<string, unknown>)),
+      connectorJobs: connectorRows.results.map((row) => normalizeConnectorJob(row as Record<string, unknown>)),
     });
   } catch (error) {
     return Response.json(
@@ -114,7 +130,7 @@ export async function POST(request: Request) {
       const task = payload.task as Record<string, unknown>;
       const id = `task-${crypto.randomUUID()}`;
       const now = new Date().toISOString();
-      await db.prepare(`INSERT INTO tasks (
+      await db.batch([db.prepare(`INSERT INTO tasks (
         id, name, jd, status, sources, tech_keywords, company_keywords,
         signal_keywords, exclude_keywords, schedule, time_range, discovered,
         high_value, last_run_at, created_at
@@ -132,28 +148,56 @@ export async function POST(request: Request) {
           String(task.timeRange ?? "近30天"),
           now,
         )
-        .run();
+        ,
+        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, now),
+      ]);
       return Response.json({ ok: true, id });
     }
 
-    if (action === "simulateRun") {
+    if (action === "analyzeJd") {
+      return Response.json(parseJd(String(payload.jd ?? "")));
+    }
+
+    if (action === "runTask") {
       const taskId = String(payload.taskId ?? "");
-      const task = await db.prepare("SELECT name FROM tasks WHERE id = ?").bind(taskId).first<{ name: string }>();
-      if (!task) return Response.json({ error: "任务不存在" }, { status: 404 });
-      const now = new Date().toISOString();
-      const runId = `run-${crypto.randomUUID()}`;
-      const fetched = 186;
-      const filtered = 109;
-      const deduped = 31;
-      const valid = 46;
-      const highValue = 8;
+      const origin = new URL(request.url).origin;
+      return Response.json({ ok: true, ...(await runTask(db, taskId, origin)) });
+    }
+
+    if (action === "updateTask") {
+      const task = payload.task as Record<string, unknown>;
+      const id = String(task.id ?? "");
+      if (!id) return Response.json({ error: "缺少任务ID" }, { status: 400 });
       await db.batch([
-        db.prepare("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(runId, taskId, task.name, now, now, "完成", fetched, filtered, deduped, valid, highValue, "增量扫描完成；旧数据已通过内容指纹过滤"),
-        db.prepare("UPDATE tasks SET discovered = discovered + ?, high_value = high_value + ?, last_run_at = ? WHERE id = ?")
-          .bind(valid, highValue, now, taskId),
+        db.prepare(`UPDATE tasks SET name=?, jd=?, status=?, sources=?, tech_keywords=?, company_keywords=?, signal_keywords=?, exclude_keywords=?, schedule=?, time_range=? WHERE id=?`)
+          .bind(String(task.name ?? "未命名任务"), String(task.jd ?? ""), String(task.status ?? "active"), JSON.stringify(task.sources ?? []),
+            JSON.stringify(task.techKeywords ?? []), JSON.stringify(task.companyKeywords ?? []), JSON.stringify(task.signalKeywords ?? []),
+            JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "每天 09:00"), String(task.timeRange ?? "近30天"), id),
+        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, new Date().toISOString()),
       ]);
-      return Response.json({ ok: true, runId });
+      return Response.json({ ok: true });
+    }
+
+    if (action === "toggleTask") {
+      const taskId = String(payload.taskId ?? "");
+      const status = String(payload.status ?? "paused") === "active" ? "active" : "paused";
+      await db.prepare("UPDATE tasks SET status = ? WHERE id = ?").bind(status, taskId).run();
+      return Response.json({ ok: true });
+    }
+
+    if (action === "deleteTask") {
+      const taskId = String(payload.taskId ?? "");
+      await db.batch([
+        db.prepare("DELETE FROM connector_jobs WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM raw_items WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM task_filters WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM leads WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM runs WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM tasks WHERE id = ?").bind(taskId),
+      ]);
+      return Response.json({ ok: true });
     }
 
     if (action === "reviewLead") {

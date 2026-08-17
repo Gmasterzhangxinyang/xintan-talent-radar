@@ -1,100 +1,69 @@
-# vinext-starter
+# 芯探 Talent Radar
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+面向芯片设计行业猎头的社媒公开信息搜集与线索分析系统。站点运行在 Cloudflare Workers/vinext，业务数据存储于 D1。
 
-## Prerequisites
+## 已实现
 
-- Node.js `>=22.13.0`
+- 多任务创建、编辑、暂停、恢复、删除
+- JD 服务端拆解：技术栈、EDA 工具、同义词、企业、求职/企业信号和排除词
+- 抖音、微博、小红书、知乎电脑 Agent 作业派发与鉴权回调协议
+- EETOP、EDA365 公开索引连接器
+- 时间范围、内容/作者/企业黑名单过滤
+- SHA-256 内容指纹增量去重，保存原始记录和结构化线索
+- 裁员、扩招、项目变动、流片问题、求职意向识别和价值评分
+- 原文、公开作者、发布时间、来源 URL、证据和人工复核状态
+- 多条件筛选、服务端 Excel 导出、运行数量审计
+- 手动扫描、后台调度端点与 Worker scheduled 处理器
 
-## Quick Start
+## 电脑 Agent 接口
 
-```bash
-npm install
-npm run dev
-npm run build
-```
+配置 Worker 环境变量：
 
-This starter does not use `wrangler.jsonc`.
+- `COMPUTER_AGENT_URL`：电脑接管产品的服务地址
+- `COMPUTER_AGENT_TOKEN`：派发任务所需 Bearer Token（可选）
+- `COMPUTER_AGENT_CALLBACK_SECRET`：回调鉴权密钥
+- `SCHEDULER_SECRET`：后台调度端点鉴权密钥
 
-## Included Shape
+系统向 `${COMPUTER_AGENT_URL}/v1/search-tasks` 发送：
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
+```json
+{
+  "jobId": "job-uuid",
+  "taskId": "task-uuid",
+  "platform": "抖音",
+  "queries": ["UVM", "准备离职"],
+  "excludeKeywords": ["培训", "广告"],
+  "timeRange": "近30天",
+  "fields": ["snippet", "author", "authorId", "publishedAt", "url"],
+  "callbackUrl": "https://site/api/connectors/computer-agent/callback"
 }
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+Agent 回调时需携带 `x-xintan-callback-secret`，Body 为：
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+```json
+{
+  "jobId": "job-uuid",
+  "taskId": "task-uuid",
+  "source": "抖音",
+  "items": [{
+    "externalId": "comment-id",
+    "author": "公开昵称",
+    "authorId": "公开ID",
+    "publishedAt": "2026-08-17T08:00:00.000Z",
+    "snippet": "公开原文",
+    "url": "https://www.douyin.com/..."
+  }]
+}
+```
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+## 本地验证
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+```bash
+npm install
+npm test
+npm run lint
+npm run dev
+```
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+社媒连接器仅处理公开或获得授权的数据。真实覆盖率、账号风控与可持续运行能力必须使用实际平台账号和电脑 Agent 联调验证。

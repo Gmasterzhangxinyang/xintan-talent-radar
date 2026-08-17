@@ -43,6 +43,26 @@ export async function ensureDatabase() {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL,
       last_check TEXT NOT NULL, coverage TEXT NOT NULL, note TEXT NOT NULL DEFAULT ''
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS task_filters (
+      task_id TEXT PRIMARY KEY, author_blacklist TEXT NOT NULL DEFAULT '[]',
+      company_blacklist TEXT NOT NULL DEFAULT '[]', schedule_enabled INTEGER NOT NULL DEFAULT 1,
+      next_run_at TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS raw_items (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, source TEXT NOT NULL,
+      external_id TEXT NOT NULL DEFAULT '', content_hash TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT '未公开', author_id TEXT NOT NULL DEFAULT '',
+      published_at TEXT NOT NULL, source_url TEXT NOT NULL, snippet TEXT NOT NULL,
+      raw_payload TEXT NOT NULL DEFAULT '{}', fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_task_hash ON raw_items(task_id, content_hash)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_raw_task_fetched ON raw_items(task_id, fetched_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS connector_jobs (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, source TEXT NOT NULL,
+      status TEXT NOT NULL, dispatched_at TEXT NOT NULL, completed_at TEXT,
+      fetched INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT ''
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_connector_jobs_task_status ON connector_jobs(task_id, status)"),
   ]);
 
   const taskCount = await db.prepare("SELECT COUNT(*) AS count FROM tasks").first<{ count: number }>();
@@ -78,12 +98,12 @@ export async function ensureDatabase() {
       .bind("run-3", "task-company", "重点企业异动监控", now, now, "部分完成", 244, 151, 48, 45, 8, "小红书登录状态需要人工确认"),
 
     ...[
-      ["douyin", "抖音", "电脑控制 / 特殊权限", "验证中", "刚刚", "公开视频与评论", "可跑通搜索和评论链路；正式运行需账号稳定性测试"],
-      ["weibo", "微博", "官方接口优先", "可连接", "2分钟前", "公开关键词结果", "额度与字段覆盖待真实账号复核"],
-      ["xiaohongshu", "小红书", "电脑控制", "待登录", "未检查", "公开笔记与评论", "无全站公开检索接口，需控制频率"],
-      ["zhihu", "知乎", "公开网页 / 电脑控制", "验证中", "12分钟前", "公开问答与文章", "全站覆盖率不作承诺"],
-      ["eetop", "EETOP", "公开网页连接器", "可连接", "5分钟前", "公开论坛主题", "适合作为芯片垂直来源"],
-      ["eda365", "EDA365", "公开网页连接器", "可连接", "4分钟前", "公开论坛主题", "职业生涯及技术板块已纳入"],
+      ["douyin", "抖音", "电脑Agent", "待配置", "未执行", "公开视频与评论", "需配置电脑接管产品的HTTP任务接口和登录账号"],
+      ["weibo", "微博", "电脑Agent", "待配置", "未执行", "公开关键词结果", "需配置电脑接管产品的HTTP任务接口和登录账号"],
+      ["xiaohongshu", "小红书", "电脑Agent", "待配置", "未执行", "公开笔记与评论", "需配置电脑接管产品的HTTP任务接口和登录账号"],
+      ["zhihu", "知乎", "电脑Agent / 公开网页", "待配置", "未执行", "公开问答与文章", "需配置电脑接管产品，覆盖率取决于账号与平台风控"],
+      ["eetop", "EETOP", "公开网页连接器", "可执行", "按任务检查", "公开论坛主题", "已实现公开索引检索，实际覆盖由站点可访问性决定"],
+      ["eda365", "EDA365", "公开网页连接器", "可执行", "按任务检查", "公开论坛主题", "已实现公开索引检索，实际覆盖由站点可访问性决定"],
     ].map((source) => db.prepare("INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?)").bind(...source)),
   ]);
 }

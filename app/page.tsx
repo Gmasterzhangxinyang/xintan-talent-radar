@@ -19,6 +19,10 @@ type Task = {
   discovered: number;
   highValue: number;
   lastRunAt?: string | null;
+  authorBlacklist?: string[];
+  companyBlacklist?: string[];
+  scheduleEnabled?: boolean;
+  nextRunAt?: string | null;
 };
 
 type Lead = {
@@ -70,6 +74,7 @@ type AppState = {
   leads: Lead[];
   runs: Run[];
   sources: Source[];
+  connectorJobs?: Array<{ id: string; taskId: string; source: string; status: string; dispatchedAt: string; fetched: number; error: string }>;
 };
 
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
@@ -93,16 +98,6 @@ function safeNumber(value: unknown) {
   return typeof value === "number" ? value : Number(value ?? 0);
 }
 
-function parseJdKeywords(jd: string) {
-  const dictionary = [
-    "UVM", "SystemVerilog", "Verilog", "VCS", "Verdi", "SoC", "GPU",
-    "DFT", "STA", "Innovus", "PrimeTime", "Calibre", "数字验证",
-    "数字后端", "模拟IC", "射频", "7nm", "5nm", "流片",
-  ];
-  const matched = dictionary.filter((word) => jd.toLowerCase().includes(word.toLowerCase()));
-  return Array.from(new Set([...matched, "芯片设计", "项目经验"])).slice(0, 8);
-}
-
 export default function Home() {
   const [view, setView] = useState<View>("overview");
   const [data, setData] = useState<AppState>(EMPTY_STATE);
@@ -110,6 +105,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState(0);
   const [toast, setToast] = useState("");
@@ -133,6 +129,8 @@ export default function Home() {
   };
 
   useEffect(() => {
+    // Initial server synchronization for the client dashboard.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadState();
   }, []);
 
@@ -164,7 +162,7 @@ export default function Home() {
     return { fetched, valid, high, confirmed };
   }, [data]);
 
-  async function simulateRun(task: Task) {
+  async function runSearchTask(task: Task) {
     if (runningTask) return;
     setRunningTask(task.id);
     setRunProgress(8);
@@ -172,16 +170,16 @@ export default function Home() {
       setRunProgress((value) => Math.min(value + Math.ceil(Math.random() * 14), 92));
     }, 360);
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 2800));
       const response = await fetch("/api/state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "simulateRun", taskId: task.id }),
+        body: JSON.stringify({ action: "runTask", taskId: task.id }),
       });
-      if (!response.ok) throw new Error("运行记录保存失败");
+      const result = await response.json() as { valid?: number; status?: string; message?: string; error?: string };
+      if (!response.ok) throw new Error(result.error || "任务运行失败");
       setRunProgress(100);
       await loadState();
-      setToast(`“${task.name}”增量扫描完成，新增46条有效线索`);
+      setToast(`“${task.name}”${result.status ?? "运行完成"}，本轮新增 ${result.valid ?? 0} 条；${result.message ?? ""}`);
     } catch (runError) {
       setToast(runError instanceof Error ? runError.message : "任务运行失败");
     } finally {
@@ -191,6 +189,18 @@ export default function Home() {
         setRunProgress(0);
       }, 700);
     }
+  }
+
+  async function changeTaskStatus(task: Task) {
+    const nextStatus = task.status === "active" ? "paused" : "active";
+    const response = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "toggleTask", taskId: task.id, status: nextStatus }) });
+    if (response.ok) { await loadState(); setToast(nextStatus === "active" ? "任务已恢复" : "任务已暂停"); }
+  }
+
+  async function deleteTask(task: Task) {
+    if (!window.confirm(`确定删除“${task.name}”及其线索和日志吗？此操作不可撤销。`)) return;
+    const response = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deleteTask", taskId: task.id }) });
+    if (response.ok) { await loadState(); setToast("任务及关联记录已删除"); }
   }
 
   async function reviewLead(lead: Lead, status: string) {
@@ -207,26 +217,12 @@ export default function Home() {
   }
 
   function exportExcel() {
-    const headers = [
-      "来源平台", "来源URL", "发布时间", "作者公开昵称", "作者公开ID", "原文片段",
-      "AI提取标签", "求职意向等级", "线索类型", "优先级", "匹配度", "企业情报备注", "处理状态",
-    ];
-    const rows = filteredLeads.map((lead) => [
-      lead.source, lead.url, lead.publishedAt, lead.author, lead.authorId, lead.snippet,
-      lead.tags.join("、"), lead.intent, lead.intelligenceType, lead.priority,
-      String(lead.score), lead.companyNote, lead.reviewStatus,
-    ]);
-    const content = [headers, ...rows]
-      .map((row) => row.map((cell) => String(cell).replaceAll("\t", " ").replaceAll("\n", " ")).join("\t"))
-      .join("\n");
-    const blob = new Blob(["\ufeff", content], { type: "application/vnd.ms-excel;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `芯探线索_${new Date().toISOString().slice(0, 10)}.xls`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setToast(`已导出 ${rows.length} 条线索`);
+    const params = new URLSearchParams();
+    if (sourceFilter !== "全部来源") params.set("source", sourceFilter);
+    if (typeFilter !== "全部类型") params.set("type", typeFilter);
+    if (priorityFilter !== "全部优先级") params.set("priority", priorityFilter);
+    window.location.href = `/api/export?${params.toString()}`;
+    setToast(`正在生成 Excel，共 ${filteredLeads.length} 条线索`);
   }
 
   if (loading) {
@@ -288,7 +284,7 @@ export default function Home() {
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
             <button className="ghost-button" onClick={() => setView("sources")}>数据源状态</button>
-            <button className="primary-button" onClick={() => setShowTaskModal(true)}>＋ 新建任务</button>
+            <button className="primary-button" onClick={() => { setEditingTask(null); setShowTaskModal(true); }}>＋ 新建任务</button>
           </div>
         </header>
 
@@ -299,7 +295,7 @@ export default function Home() {
               totals={totals}
               runningTask={runningTask}
               runProgress={runProgress}
-              onRun={simulateRun}
+              onRun={runSearchTask}
               onViewLead={(lead) => setSelectedLead(lead)}
               onNavigate={setView}
             />
@@ -309,8 +305,11 @@ export default function Home() {
               tasks={data.tasks}
               runningTask={runningTask}
               runProgress={runProgress}
-              onRun={simulateRun}
-              onCreate={() => setShowTaskModal(true)}
+              onRun={runSearchTask}
+              onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
+              onEdit={(task) => { setEditingTask(task); setShowTaskModal(true); }}
+              onToggle={(task) => void changeTaskStatus(task)}
+              onDelete={(task) => void deleteTask(task)}
             />
           )}
           {view === "leads" && (
@@ -333,9 +332,11 @@ export default function Home() {
 
       {showTaskModal && (
         <TaskModal
-          onClose={() => setShowTaskModal(false)}
+          task={editingTask}
+          onClose={() => { setShowTaskModal(false); setEditingTask(null); }}
           onCreated={async () => {
             setShowTaskModal(false);
+            setEditingTask(null);
             await loadState();
             setView("tasks");
             setToast("检索任务已创建，可立即运行");
@@ -436,12 +437,15 @@ function Metric({ label, value, delta, tone }: { label: string; value: string; d
   return <div className={`metric-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>{delta}</small></div>;
 }
 
-function TasksView({ tasks, runningTask, runProgress, onRun, onCreate }: {
+function TasksView({ tasks, runningTask, runProgress, onRun, onCreate, onEdit, onToggle, onDelete }: {
   tasks: Task[];
   runningTask: string | null;
   runProgress: number;
   onRun: (task: Task) => void;
   onCreate: () => void;
+  onEdit: (task: Task) => void;
+  onToggle: (task: Task) => void;
+  onDelete: (task: Task) => void;
 }) {
   return (
     <section>
@@ -449,13 +453,13 @@ function TasksView({ tasks, runningTask, runProgress, onRun, onCreate }: {
       <div className="task-grid">
         {tasks.map((task) => (
           <article className="task-card" key={task.id}>
-            <div className="task-top"><span className={task.status === "active" ? "status-badge active" : "status-badge paused"}>{task.status === "active" ? "运行中" : "已暂停"}</span><button className="more-button" aria-label="更多操作">•••</button></div>
+            <div className="task-top"><span className={task.status === "active" ? "status-badge active" : "status-badge paused"}>{task.status === "active" ? "运行中" : "已暂停"}</span><div className="task-actions"><button className="more-button" onClick={() => onEdit(task)}>编辑</button><button className="more-button" onClick={() => onToggle(task)}>{task.status === "active" ? "暂停" : "恢复"}</button><button className="more-button danger" onClick={() => onDelete(task)}>删除</button></div></div>
             <h3>{task.name}</h3><p className="task-jd">{task.jd}</p>
             <div className="tag-row">{task.techKeywords.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
             <div className="task-meta"><span>来源 <b>{task.sources.length}</b></span><span>线索 <b>{task.discovered}</b></span><span>A级 <b>{task.highValue}</b></span></div>
             <div className="task-schedule"><span>↻ {task.schedule}</span><span>{task.timeRange}</span></div>
             {runningTask === task.id && <div className="progress-track"><span style={{ width: `${runProgress}%` }} /></div>}
-            <button className="run-button" disabled={Boolean(runningTask) || task.status !== "active"} onClick={() => onRun(task)}>{runningTask === task.id ? `正在扫描 ${runProgress}%` : task.status === "active" ? "立即运行" : "恢复后运行"}</button>
+            <button className="run-button" disabled={Boolean(runningTask) || task.status !== "active"} onClick={() => onRun(task)}>{runningTask === task.id ? `正在扫描 ${runProgress}%` : task.status === "active" ? "立即增量扫描" : "恢复后运行"}</button>
           </article>
         ))}
       </div>
@@ -545,35 +549,49 @@ function SourcesView({ sources }: { sources: Source[] }) {
   );
 }
 
-function TaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => Promise<void> }) {
-  const [name, setName] = useState("模拟IC设计工程师");
-  const [jd, setJd] = useState("模拟IC设计工程师，5年以上经验，熟悉PLL、ADC或电源管理芯片，有完整流片经验，工作地点上海。 ");
-  const [techKeywords, setTechKeywords] = useState<string[]>([]);
-  const [companies, setCompanies] = useState("海思、圣邦微、思瑞浦");
-  const [sources, setSources] = useState(["抖音", "微博", "EETOP"]);
+function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: () => void; onCreated: () => Promise<void> }) {
+  const [name, setName] = useState(task?.name ?? "模拟IC设计工程师");
+  const [jd, setJd] = useState(task?.jd ?? "模拟IC设计工程师，5年以上经验，熟悉PLL、ADC或电源管理芯片，有完整流片经验，工作地点上海。");
+  const [techKeywords, setTechKeywords] = useState<string[]>(task?.techKeywords ?? []);
+  const [companies, setCompanies] = useState((task?.companyKeywords ?? ["海思", "圣邦微", "思瑞浦"]).join("、"));
+  const [signals, setSignals] = useState((task?.signalKeywords ?? ["看机会", "准备离职", "团队调整", "扩招", "流片延期"]).join("、"));
+  const [excludes, setExcludes] = useState((task?.excludeKeywords ?? ["培训", "招生", "广告"]).join("、"));
+  const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
+  const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
+  const [sources, setSources] = useState(task?.sources ?? ["抖音", "微博", "EETOP"]);
+  const [schedule, setSchedule] = useState(task?.schedule ?? "每天 09:00");
+  const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const split = (value: string) => value.split(/[、,，;；\n]/).map((item) => item.trim()).filter(Boolean);
 
-  function analyze() {
-    setTechKeywords(parseJdKeywords(jd));
+  async function analyze() {
+    setAnalyzing(true);
+    try {
+      const response = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "analyzeJd", jd }) });
+      const result = await response.json() as { techKeywords?: string[]; companyKeywords?: string[]; signalKeywords?: string[]; excludeKeywords?: string[] };
+      if (response.ok) {
+        setTechKeywords(result.techKeywords ?? []);
+        if (result.companyKeywords?.length) setCompanies(result.companyKeywords.join("、"));
+        if (result.signalKeywords?.length) setSignals(result.signalKeywords.join("、"));
+        if (result.excludeKeywords?.length) setExcludes(result.excludeKeywords.join("、"));
+        return result.techKeywords ?? [];
+      }
+      return [];
+    } finally { setAnalyzing(false); }
   }
 
   async function save() {
     if (!name.trim() || !jd.trim()) return;
     setSaving(true);
+    const effectiveTechKeywords = techKeywords.length ? techKeywords : await analyze();
     const response = await fetch("/api/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "createTask",
-        task: {
-          name, jd, sources,
-          techKeywords: techKeywords.length ? techKeywords : parseJdKeywords(jd),
-          companyKeywords: companies.split(/[、,，]/).map((item) => item.trim()).filter(Boolean),
-          signalKeywords: ["看机会", "准备离职", "团队调整", "扩招", "流片延期"],
-          excludeKeywords: ["培训", "招生", "广告"],
-          schedule: "每天 09:00",
-          timeRange: "近30天",
-        },
+        action: task ? "updateTask" : "createTask",
+        task: { id: task?.id, name, jd, status: task?.status ?? "active", sources, techKeywords: effectiveTechKeywords,
+          companyKeywords: split(companies), signalKeywords: split(signals), excludeKeywords: split(excludes),
+          authorBlacklist: split(authorBlacklist), companyBlacklist: split(companyBlacklist), schedule, timeRange, scheduleEnabled: schedule !== "仅手动运行" },
       }),
     });
     setSaving(false);
@@ -583,16 +601,20 @@ function TaskModal({ onClose, onCreated }: { onClose: () => void; onCreated: () 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
-        <div className="modal-head"><div><p className="eyebrow">NEW SEARCH MISSION</p><h2 id="task-modal-title">创建检索任务</h2></div><button className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
+        <div className="modal-head"><div><p className="eyebrow">SEARCH MISSION</p><h2 id="task-modal-title">{task ? "编辑检索任务" : "创建检索任务"}</h2></div><button className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
         <div className="modal-body">
           <label><span>任务名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label><span>职位描述 JD</span><textarea rows={6} value={jd} onChange={(event) => setJd(event.target.value)} /></label>
-          <button className="analyze-button" onClick={analyze}>✦ AI拆解技术栈和检索词</button>
-          {techKeywords.length > 0 && <div className="keyword-box"><b>识别出的技术词</b><div className="tag-row">{techKeywords.map((word) => <span key={word}>{word}</span>)}</div><small>正式版本将同时扩展同义词、缩写和EDA工具名称。</small></div>}
-          <label><span>目标企业</span><input value={companies} onChange={(event) => setCompanies(event.target.value)} /><small>使用顿号或逗号分隔</small></label>
+          <label><span>职位描述 JD</span><textarea rows={5} value={jd} onChange={(event) => setJd(event.target.value)} /></label>
+          <button className="analyze-button" disabled={analyzing} onClick={() => void analyze()}>{analyzing ? "正在拆解…" : "✦ AI拆解技术栈和检索词"}</button>
+          {techKeywords.length > 0 && <div className="keyword-box"><b>识别及扩展出的技术词</b><div className="tag-row">{techKeywords.map((word) => <span key={word}>{word}</span>)}</div><small>服务端芯片行业词库会扩展缩写、同义词和EDA工具名称。</small></div>}
+          <label><span>目标企业</span><input value={companies} onChange={(event) => setCompanies(event.target.value)} /></label>
+          <label><span>求职与企业信号关键词</span><input value={signals} onChange={(event) => setSignals(event.target.value)} /></label>
+          <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} /></label>
+          <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
+          <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
           <fieldset><legend>数据源</legend><div className="source-checks">{ALL_SOURCES.map((source) => <label key={source}><input type="checkbox" checked={sources.includes(source)} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div></fieldset>
         </div>
-        <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在创建…" : "创建并进入任务"}</button></div>
+        <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>
       </section>
     </div>
   );

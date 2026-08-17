@@ -15,7 +15,7 @@ test("covers the complete MVP workflow", async () => {
     assert.match(page, new RegExp(capability));
   }
   assert.match(page, /reviewLead/);
-  assert.match(page, /simulateRun/);
+  assert.match(page, /runSearchTask/);
 });
 
 test("uses D1-backed product records", async () => {
@@ -27,5 +27,18 @@ test("uses D1-backed product records", async () => {
   assert.match(schema, /export const leads/);
   assert.match(schema, /export const runs/);
   assert.match(schema, /export const sources/);
+  assert.match(schema, /export const rawItems/);
+  assert.match(schema, /export const connectorJobs/);
   assert.equal(JSON.parse(hosting).d1, "DB");
+});
+
+test("implements the server-side collection pipeline", async () => {
+  const files = await Promise.all([
+    "../lib/pipeline.ts", "../lib/connectors.ts", "../lib/analyzer.ts", "../lib/dedupe.ts",
+    "../app/api/connectors/computer-agent/callback/route.ts", "../app/api/scheduler/run-due/route.ts", "../app/api/export/route.ts",
+  ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+  const source = files.join("\n");
+  for (const capability of ["contentHash", "raw_items", "connector_jobs", "COMPUTER_AGENT_URL", "SCHEDULER_SECRET", "application/vnd.ms-excel"]) {
+    assert.match(source, new RegExp(capability));
+  }
 });

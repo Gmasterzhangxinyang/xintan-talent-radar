@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const tasks = sqliteTable(
   "tasks",
@@ -80,3 +80,49 @@ export const sources = sqliteTable("sources", {
   coverage: text("coverage").notNull(),
   note: text("note").notNull().default(""),
 });
+
+export const taskFilters = sqliteTable("task_filters", {
+  taskId: text("task_id").primaryKey(),
+  authorBlacklist: text("author_blacklist").notNull().default("[]"),
+  companyBlacklist: text("company_blacklist").notNull().default("[]"),
+  scheduleEnabled: integer("schedule_enabled").notNull().default(1),
+  nextRunAt: text("next_run_at"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const rawItems = sqliteTable(
+  "raw_items",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    source: text("source").notNull(),
+    externalId: text("external_id").notNull().default(""),
+    contentHash: text("content_hash").notNull(),
+    author: text("author").notNull().default("未公开"),
+    authorId: text("author_id").notNull().default(""),
+    publishedAt: text("published_at").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    snippet: text("snippet").notNull(),
+    rawPayload: text("raw_payload").notNull().default("{}"),
+    fetchedAt: text("fetched_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("uq_raw_task_hash").on(table.taskId, table.contentHash),
+    index("idx_raw_task_fetched").on(table.taskId, table.fetchedAt),
+  ],
+);
+
+export const connectorJobs = sqliteTable(
+  "connector_jobs",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull(),
+    dispatchedAt: text("dispatched_at").notNull(),
+    completedAt: text("completed_at"),
+    fetched: integer("fetched").notNull().default(0),
+    error: text("error").notNull().default(""),
+  },
+  (table) => [index("idx_connector_jobs_task_status").on(table.taskId, table.status)],
+);

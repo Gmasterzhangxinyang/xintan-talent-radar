@@ -5,6 +5,7 @@ import handler from "vinext/server/app-router-entry";
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  SCHEDULER_SECRET?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -41,6 +42,12 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (!env.SCHEDULER_SECRET) return;
+    ctx.waitUntil(handler.fetch(new Request("https://xintan.internal/api/scheduler/run-due", {
+      method: "POST", headers: { Authorization: `Bearer ${env.SCHEDULER_SECRET}` },
+    }), env, ctx));
   },
 };
 
