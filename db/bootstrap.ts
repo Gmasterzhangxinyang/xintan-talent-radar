@@ -57,17 +57,17 @@ export async function ensureDatabase() {
     db.prepare(`INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("task-company", "重点企业异动监控", "监控GPU、AI芯片及SoC企业的裁员、扩招、项目变动和流片问题。", "paused", JSON.stringify(["微博", "知乎", "抖音", "EETOP", "EDA365"]), JSON.stringify(["GPU", "SoC", "流片", "回片", "良率"]), JSON.stringify(["壁仞", "燧原", "沐曦", "摩尔线程"]), JSON.stringify(["裁员", "扩招", "冻结HC", "流片延期", "项目暂停"]), JSON.stringify(["媒体转载", "广告"]), "每天 18:00", "近7天", 128, 19, now, now),
 
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-1", "task-gpu", "抖音", "芯片搬砖人", "douyin_4c9a", "2026-08-16 21:34", "项目刚被砍，组里最近变化挺大，准备看看上海的新机会。", JSON.stringify(["GPU", "数字验证", "项目变动"]), "强", "人才线索", "A", 91, "疑似GPU验证团队人员流动", "准备看看上海的新机会", "https://www.douyin.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-2", "task-gpu", "EETOP", "ic_flow_2020", "uid_88210", "2026-08-16 10:22", "UVM做了六年，两次SoC流片，今年有计划从深圳去上海发展。", JSON.stringify(["UVM", "SoC", "流片"]), "强", "人才线索", "A", 88, "验证经验与地域意向高度匹配", "有计划从深圳去上海发展", "https://www.eetop.cn/", "已确认", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-3", "task-company", "微博", "半导体观察员", "wb_7320", "2026-08-15 18:10", "某GPU公司验证团队近期还在扩大规模，多个方向重新开放HC。", JSON.stringify(["扩招", "GPU", "HC开放"]), "无", "企业情报", "A", 86, "验证团队扩招，可能产生招聘需求", "多个方向重新开放HC", "https://weibo.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-4", "task-pd", "知乎", "后端老兵", "zh_51e8", "2026-08-14 09:42", "最近项目收尾，后续方向不太确定，做过7nm后端和完整sign-off。", JSON.stringify(["7nm", "数字后端", "Sign-off"]), "中", "人才线索", "B", 79, "技术匹配，求职表达不明确", "后续方向不太确定", "https://www.zhihu.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-5", "task-company", "EDA365", "EDA小匠", "eda_1923", "2026-08-13 16:05", "听说二次流片时间又往后推，验证和后端最近都在加班收敛问题。", JSON.stringify(["流片延期", "验证", "数字后端"]), "无", "企业情报", "B", 76, "项目进度存在风险，需交叉验证", "二次流片时间又往后推", "https://bbs.eda365.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-6", "task-gpu", "小红书", "IC日常记录", "xhs_27ad", "2026-08-12 20:17", "做验证第三年，想了解一下上海AI芯片公司的机会和团队情况。", JSON.stringify(["AI芯片", "数字验证", "上海"]), "强", "人才线索", "A", 84, "主动了解机会，年限略低于JD", "想了解一下上海AI芯片公司的机会", "https://www.xiaohongshu.com/", "待审核", now),
 
     db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
