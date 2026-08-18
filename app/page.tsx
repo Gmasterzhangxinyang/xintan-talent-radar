@@ -105,6 +105,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState(0);
@@ -284,7 +285,7 @@ export default function Home() {
               <span>⌕</span>
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
-            <button className="ghost-button" onClick={() => setView("sources")}>数据源状态</button>
+            <button className="ghost-button" onClick={() => setShowGuide(true)}>使用引导</button>
             <button className="primary-button" onClick={() => { setEditingTask(null); setShowTaskModal(true); }}>＋ 新建任务</button>
           </div>
         </header>
@@ -294,11 +295,9 @@ export default function Home() {
             <Overview
               data={data}
               totals={totals}
-              runningTask={runningTask}
-              runProgress={runProgress}
-              onRun={runSearchTask}
               onViewLead={(lead) => setSelectedLead(lead)}
               onNavigate={setView}
+              onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
             />
           )}
           {view === "tasks" && (
@@ -346,6 +345,14 @@ export default function Home() {
         />
       )}
 
+      {showGuide && (
+        <GuideModal
+          onClose={() => setShowGuide(false)}
+          onCreate={() => { setShowGuide(false); setEditingTask(null); setShowTaskModal(true); }}
+          onNavigate={(nextView) => { setShowGuide(false); setView(nextView); }}
+        />
+      )}
+
       {selectedLead && (
         <LeadDrawer
           lead={selectedLead}
@@ -360,17 +367,17 @@ export default function Home() {
 }
 
 function Overview({
-  data, totals, runningTask, runProgress, onRun, onViewLead, onNavigate,
+  data, totals, onViewLead, onNavigate, onCreate,
 }: {
   data: AppState;
   totals: { fetched: number; valid: number; high: number; confirmed: number };
-  runningTask: string | null;
-  runProgress: number;
-  onRun: (task: Task) => void;
   onViewLead: (lead: Lead) => void;
   onNavigate: (view: View) => void;
+  onCreate: () => void;
 }) {
-  const primaryTask = data.tasks.find((task) => task.status === "active");
+  const activeTasks = data.tasks.filter((task) => task.status === "active").length;
+  const readySources = data.sources.filter((source) => ["可连接", "可执行"].includes(source.status)).length;
+  const pendingLeads = data.leads.filter((lead) => lead.reviewStatus === "待审核").length;
   return (
     <>
       <section className="hero-panel">
@@ -379,12 +386,8 @@ function Overview({
           <h2>将公开信号，转化为<br /><em>可执行的人才情报。</em></h2>
           <p>把 JD 变成持续运行的跨平台检索任务。自动过滤噪声、识别人才流动与企业异动，并为每一条判断保留可追溯证据。</p>
           <div className="hero-actions">
-            {primaryTask && (
-              <button className="light-button" onClick={() => onRun(primaryTask)} disabled={Boolean(runningTask)}>
-                {runningTask ? `正在扫描 ${runProgress}%` : "运行重点任务 →"}
-              </button>
-            )}
-            <button className="text-button light" onClick={() => onNavigate("leads")}>查看全部线索</button>
+            <button className="light-button" onClick={onCreate}>从 JD 创建任务 →</button>
+            <button className="text-button light" onClick={() => onNavigate("leads")}>查看示例线索</button>
           </div>
         </div>
         <div className="hero-visual" aria-label="今日新增线索统计">
@@ -396,6 +399,17 @@ function Overview({
           <div className="floating-signal signal-c"><b>!</b><span>流片异动</span></div>
         </div>
       </section>
+
+      <section className="quickstart-panel">
+        <div className="quickstart-head"><div><p className="eyebrow">GET STARTED</p><h3>第一次使用？按这三步完成一次检索</h3></div><span>预计 3 分钟</span></div>
+        <div className="quickstart-steps">
+          <button onClick={onCreate}><b>01</b><span><strong>导入 JD</strong><small>自动拆解技术栈、企业和求职信号</small></span><em>{activeTasks} 个任务</em></button>
+          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>确认数据源</strong><small>论坛可直接运行，社媒需连接电脑 Agent</small></span><em>{readySources}/6 可运行</em></button>
+          <button onClick={() => onNavigate("leads")}><b>03</b><span><strong>审核线索</strong><small>查看原文证据，确认高价值候选人</small></span><em>{pendingLeads} 条待审核</em></button>
+        </div>
+      </section>
+
+      <div className="demo-banner"><span>DEMO DATA</span><p>当前首页包含 6 条示例线索，帮助理解产品流程；新任务产生的结果与运行数量均来自真实连接器。</p></div>
 
       <section className="metric-grid">
         <Metric label="累计分析内容" value={totals.fetched.toLocaleString()} delta="跨6个来源" tone="ink" />
@@ -635,6 +649,26 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>
+      </section>
+    </div>
+  );
+}
+
+function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; onCreate: () => void; onNavigate: (view: View) => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+        <div className="modal-head"><div><p className="eyebrow">QUICK START GUIDE</p><h2 id="guide-title">三分钟完成第一次人才检索</h2></div><button className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
+        <div className="guide-body">
+          <p className="guide-intro">不用先研究所有菜单。创建一个任务、运行一次检索、审核一条线索，就能理解完整工作流。</p>
+          <div className="guide-journey">
+            <article><span>01</span><div><h3>粘贴客户 JD</h3><p>系统自动识别职位、技术栈、目标企业、求职信号和排除词，你只需检查结果。</p><button onClick={onCreate}>创建检索任务 →</button></div></article>
+            <article><span>02</span><div><h3>选择并运行数据源</h3><p>EETOP、EDA365 可直接验证；抖音等社媒会在电脑 Agent 接通后自动派发。</p><button onClick={() => onNavigate("sources")}>查看数据源状态 →</button></div></article>
+            <article><span>03</span><div><h3>人工复核高价值线索</h3><p>优先看 A 级线索，核对公开原文、作者和来源链接，再标记确认或误报。</p><button onClick={() => onNavigate("leads")}>打开线索工作台 →</button></div></article>
+          </div>
+          <div className="guide-terms"><b>三个概念</b><span><strong>任务</strong>＝一套持续运行的检索条件</span><span><strong>线索</strong>＝经过过滤和分析的公开内容</span><span><strong>运行日志</strong>＝每次获取、过滤、去重的审计记录</span></div>
+        </div>
+        <div className="modal-actions"><button className="ghost-button" onClick={onClose}>稍后再看</button><button className="primary-button" onClick={onCreate}>开始创建第一个任务</button></div>
       </section>
     </div>
   );
