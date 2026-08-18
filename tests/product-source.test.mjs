@@ -35,10 +35,10 @@ test("uses D1-backed product records", async () => {
 test("implements the server-side collection pipeline", async () => {
   const files = await Promise.all([
     "../lib/pipeline.ts", "../lib/connectors.ts", "../lib/analyzer.ts", "../lib/dedupe.ts",
-    "../app/api/connectors/computer-agent/callback/route.ts", "../app/api/scheduler/run-due/route.ts", "../app/api/export/route.ts",
+    "../app/api/connectors/computer-agent/callback/route.ts", "../app/api/scheduler/run-due/route.ts", "../app/api/export/route.ts", "../app/api/health/route.ts",
   ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
   const source = files.join("\n");
-  for (const capability of ["contentHash", "raw_items", "connector_jobs", "COMPUTER_AGENT_URL", "SCHEDULER_SECRET", "application/vnd.ms-excel"]) {
+  for (const capability of ["contentHash", "raw_items", "connector_jobs", "COMPUTER_AGENT_URL", "SCHEDULER_SECRET", "application/vnd.ms-excel", "AbortSignal.timeout", "core_operational_connectors_pending"]) {
     assert.match(source, new RegExp(capability));
   }
 });

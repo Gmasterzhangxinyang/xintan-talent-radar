@@ -30,7 +30,9 @@ export async function ingestCandidates(db: D1Database, task: TaskRecord, items: 
   const companyBlacklist = parseStringArray(filterRow?.company_blacklist).map((item) => item.toLowerCase());
   for (const item of items) {
     const searchable = `${item.author ?? ""} ${item.snippet}`.toLowerCase();
-    if (!item.snippet.trim() || !item.url || !allowedByTime(item.publishedAt, task.time_range) ||
+    let validUrl = false;
+    try { validUrl = ["http:", "https:"].includes(new URL(item.url).protocol); } catch { validUrl = false; }
+    if (!item.snippet.trim() || item.snippet.length > 5_000 || !validUrl || !allowedByTime(item.publishedAt, task.time_range) ||
       excludes.some((term) => searchable.includes(term)) || authorBlacklist.some((term) => (item.author ?? "").toLowerCase().includes(term)) ||
       companyBlacklist.some((term) => searchable.includes(term))) {
       stats.filtered += 1;
@@ -41,15 +43,16 @@ export async function ingestCandidates(db: D1Database, task: TaskRecord, items: 
     if (duplicate) { stats.deduped += 1; continue; }
     const analysis = analyzeCandidate(item.snippet, { tech, companies, signals });
     const now = new Date().toISOString();
+    const publishedAt = item.publishedAt ?? "未公开";
     const rawId = `raw-${crypto.randomUUID()}`;
     const leadId = `lead-${crypto.randomUUID()}`;
     await db.batch([
       db.prepare(`INSERT INTO raw_items (id, task_id, source, external_id, content_hash, author, author_id, published_at, source_url, snippet, raw_payload, fetched_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(rawId, task.id, item.source, item.externalId ?? "", hash, item.author ?? "未公开", item.authorId ?? "", item.publishedAt ?? now, item.url, item.snippet, JSON.stringify(item.raw ?? {}), now),
+        .bind(rawId, task.id, item.source, item.externalId ?? "", hash, item.author ?? "未公开", item.authorId ?? "", publishedAt, item.url, item.snippet, JSON.stringify(item.raw ?? {}), now),
       db.prepare(`INSERT INTO leads (id, task_id, source, author, author_id, published_at, snippet, tags, intent, intelligence_type, priority, score, company_note, evidence, url, review_status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '待审核', ?)`)
-        .bind(leadId, task.id, item.source, item.author ?? "未公开", item.authorId ?? "", item.publishedAt ?? now, item.snippet,
+        .bind(leadId, task.id, item.source, item.author ?? "未公开", item.authorId ?? "", publishedAt, item.snippet,
           JSON.stringify(analysis.tags), analysis.intent, analysis.intelligenceType, analysis.priority, analysis.score, analysis.companyNote, analysis.evidence, item.url, now),
     ]);
     stats.valid += 1;

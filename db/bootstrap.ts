@@ -90,11 +90,11 @@ export async function ensureDatabase() {
     db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("lead-6", "task-gpu", "小红书", "IC日常记录", "xhs_27ad", "2026-08-12 20:17", "做验证第三年，想了解一下上海AI芯片公司的机会和团队情况。", JSON.stringify(["AI芯片", "数字验证", "上海"]), "强", "人才线索", "A", 84, "主动了解机会，年限略低于JD", "想了解一下上海AI芯片公司的机会", "https://www.xiaohongshu.com/", "待审核", now),
 
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("run-1", "task-gpu", "GPU数字验证工程师", now, now, "完成", 620, 410, 126, 84, 12, "6个来源执行完成，增量游标已更新"),
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("run-2", "task-pd", "先进工艺数字后端", now, now, "完成", 318, 208, 67, 43, 7, "知乎连接器使用验证样本，其余来源正常"),
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind("run-3", "task-company", "重点企业异动监控", now, now, "部分完成", 244, 151, 48, 45, 8, "小红书登录状态需要人工确认"),
 
     ...[

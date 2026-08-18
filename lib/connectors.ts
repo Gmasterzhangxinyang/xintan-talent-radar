@@ -17,7 +17,7 @@ function plainText(html: string) {
 export async function collectPublicForum(source: string, task: TaskRecord): Promise<CandidateItem[]> {
   const root = FORUMS[source];
   if (!root) return [];
-  const response = await fetch(root, { headers: { "User-Agent": "Mozilla/5.0 (compatible; XintanTalentRadar/1.0; public-index-validation)" } });
+  const response = await fetch(root, { signal: AbortSignal.timeout(12_000), headers: { "User-Agent": "Mozilla/5.0 (compatible; XintanTalentRadar/1.0; public-index-validation)" } });
   if (!response.ok) throw new Error(`${source} HTTP ${response.status}`);
   const html = await response.text();
   const keywords = unique([
@@ -60,7 +60,7 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
   try {
     const response = await fetch(`${endpoint}/v1/search-tasks`, {
       method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 160)}`);
     await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at) VALUES (?, ?, ?, 'dispatched', ?)")

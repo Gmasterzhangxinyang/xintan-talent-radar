@@ -16,6 +16,7 @@ export async function POST(request: Request) {
   const db = getD1();
   const task = await db.prepare("SELECT * FROM tasks WHERE id = ?").bind(payload.taskId).first<TaskRecord>();
   if (!task) return Response.json({ error: "任务不存在" }, { status: 404 });
+  if (payload.items.length > 500) return Response.json({ error: "单次回调最多 500 条" }, { status: 413 });
   const items = payload.items.map((item) => ({ ...item, source: payload.source! }));
   const stats = await ingestCandidates(db, task, items);
   const now = new Date().toISOString();

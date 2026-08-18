@@ -250,8 +250,8 @@ export default function Home() {
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark">芯</div>
-          <div><strong>芯探</strong><span>Talent Radar</span></div>
+          <div className="brand-mark">X</div>
+          <div><strong>芯探</strong><span>XINTAN INTELLIGENCE</span></div>
         </div>
         <nav aria-label="主导航">
           {NAV_ITEMS.map((item) => (
@@ -266,9 +266,9 @@ export default function Home() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className="system-pulse"><span />验证环境运行中</div>
-          <p>公开及授权数据范围</p>
-          <small>v0.1 功能验证版</small>
+          <div className="system-pulse"><span />SYSTEM OPERATIONAL</div>
+          <p>Public & authorized intelligence</p>
+          <small>PRIVATE BETA · v0.3</small>
         </div>
       </aside>
 
@@ -279,6 +279,7 @@ export default function Home() {
             <h1>{NAV_ITEMS.find((item) => item.id === view)?.label}</h1>
           </div>
           <div className="top-actions">
+            <span className="workspace-badge"><i /> PRIVATE WORKSPACE</span>
             <label className="global-search">
               <span>⌕</span>
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -326,7 +327,7 @@ export default function Home() {
             />
           )}
           {view === "runs" && <RunsView runs={data.runs} />}
-          {view === "sources" && <SourcesView sources={data.sources} />}
+          {view === "sources" && <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} />}
         </div>
       </section>
 
@@ -335,11 +336,12 @@ export default function Home() {
           task={editingTask}
           onClose={() => { setShowTaskModal(false); setEditingTask(null); }}
           onCreated={async () => {
+            const wasEditing = Boolean(editingTask);
             setShowTaskModal(false);
             setEditingTask(null);
             await loadState();
             setView("tasks");
-            setToast("检索任务已创建，可立即运行");
+            setToast(wasEditing ? "检索任务已更新" : "检索任务已创建，可立即运行");
           }}
         />
       )}
@@ -373,9 +375,9 @@ function Overview({
     <>
       <section className="hero-panel">
         <div className="hero-copy">
-          <div className="live-label"><span />今日情报已更新</div>
-          <h2>从碎片信息里，<br /><em>找到值得跟进的人。</em></h2>
-          <p>把JD变成跨平台检索任务，自动过滤噪声、识别求职信号与企业异动，并保留每条判断的原始证据。</p>
+          <div className="live-label"><span />INTELLIGENCE ENGINE ONLINE</div>
+          <h2>将公开信号，转化为<br /><em>可执行的人才情报。</em></h2>
+          <p>把 JD 变成持续运行的跨平台检索任务。自动过滤噪声、识别人才流动与企业异动，并为每一条判断保留可追溯证据。</p>
           <div className="hero-actions">
             {primaryTask && (
               <button className="light-button" onClick={() => onRun(primaryTask)} disabled={Boolean(runningTask)}>
@@ -388,7 +390,7 @@ function Overview({
         <div className="hero-visual" aria-label="今日新增线索统计">
           <div className="signal-orbit orbit-one" />
           <div className="signal-orbit orbit-two" />
-          <div className="hero-score"><strong>31</strong><span>今日新增</span></div>
+          <div className="hero-score"><strong>{data.leads.length}</strong><span>ACTIVE SIGNALS</span></div>
           <div className="floating-signal signal-a"><b>A</b><span>强求职信号</span></div>
           <div className="floating-signal signal-b"><b>+</b><span>团队扩招</span></div>
           <div className="floating-signal signal-c"><b>!</b><span>流片异动</span></div>
@@ -423,7 +425,7 @@ function Overview({
               <div className="source-mini" key={source.id}>
                 <span className="source-logo">{initials(source.name)}</span>
                 <span><b>{source.name}</b><small>{source.mode}</small></span>
-                <i className={`health-dot ${source.status === "可连接" ? "healthy" : source.status === "待登录" ? "warning" : "testing"}`} />
+                <i className={`health-dot ${["可连接", "可执行"].includes(source.status) ? "healthy" : source.status.includes("待") ? "warning" : "testing"}`} />
               </div>
             ))}
           </div>
@@ -530,21 +532,27 @@ function RunsView({ runs }: { runs: Run[] }) {
   );
 }
 
-function SourcesView({ sources }: { sources: Source[] }) {
+function SourcesView({ sources, jobs }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]> }) {
+  const completedJobs = jobs.filter((job) => job.status === "completed").length;
+  const waitingJobs = jobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>明确区分已连接、正在验证和需要账号授权的来源，不把演示样本伪装成真实全量数据。</p></div><button className="ghost-button">↻ 全部检查</button></div>
+      <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过你现有的电脑 Agent 安全派发任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
+      <div className="connector-readiness">
+        <div><span>COMPUTER AGENT</span><strong>{waitingJobs ? "等待接入" : "连接状态正常"}</strong><p>配置服务地址、回调密钥和平台登录账号后，抖音/微博/小红书/知乎任务会自动派发并回写结果。</p></div>
+        <div className="readiness-steps"><span className="done">01 · 数据协议</span><span className="done">02 · 安全回调</span><span className={waitingJobs ? "current" : "done"}>03 · Agent 地址</span><span>04 · 账号实测</span></div>
+      </div>
       <div className="source-grid">
         {sources.map((source) => (
           <article className="source-card" key={source.id}>
-            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${source.status === "可连接" ? "connected" : source.status === "待登录" ? "login" : "testing"}`}>{source.status}</span></div>
+            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行"].includes(source.status) ? "connected" : source.status.includes("待") ? "login" : "testing"}`}>{source.status}</span></div>
             <dl><div><dt>接入方式</dt><dd>{source.mode}</dd></div><div><dt>最近检查</dt><dd>{source.lastCheck}</dd></div></dl>
             <p>{source.note}</p>
-            <button className="source-action">查看连接器详情 →</button>
+            <span className="source-action">{["可连接", "可执行"].includes(source.status) ? "READY TO RUN" : "CONFIGURATION REQUIRED"}</span>
           </article>
         ))}
       </div>
-      <div className="boundary-note"><b>验证边界</b><span>本版本验证完整产品流程和公开数据字段；平台覆盖率、账号风控与商业权限需要在客户真实账号下继续测试。</span></div>
+      <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始六条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>
   );
 }
@@ -563,13 +571,16 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [formError, setFormError] = useState("");
   const split = (value: string) => value.split(/[、,，;；\n]/).map((item) => item.trim()).filter(Boolean);
 
   async function analyze() {
+    if (!jd.trim()) { setFormError("请先填写 JD 内容"); return []; }
+    setFormError("");
     setAnalyzing(true);
     try {
       const response = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "analyzeJd", jd }) });
-      const result = await response.json() as { techKeywords?: string[]; companyKeywords?: string[]; signalKeywords?: string[]; excludeKeywords?: string[] };
+      const result = await response.json() as { techKeywords?: string[]; companyKeywords?: string[]; signalKeywords?: string[]; excludeKeywords?: string[]; error?: string };
       if (response.ok) {
         setTechKeywords(result.techKeywords ?? []);
         if (result.companyKeywords?.length) setCompanies(result.companyKeywords.join("、"));
@@ -577,25 +588,33 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
         if (result.excludeKeywords?.length) setExcludes(result.excludeKeywords.join("、"));
         return result.techKeywords ?? [];
       }
+      setFormError(result.error ?? "JD 拆解失败，请稍后重试");
       return [];
-    } finally { setAnalyzing(false); }
+    } catch { setFormError("网络异常，JD 拆解未完成"); return []; }
+    finally { setAnalyzing(false); }
   }
 
   async function save() {
-    if (!name.trim() || !jd.trim()) return;
+    if (!name.trim() || !jd.trim()) { setFormError("任务名称和 JD 不能为空"); return; }
+    if (!sources.length) { setFormError("至少选择一个数据源"); return; }
+    setFormError("");
     setSaving(true);
     const effectiveTechKeywords = techKeywords.length ? techKeywords : await analyze();
-    const response = await fetch("/api/state", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: task ? "updateTask" : "createTask",
-        task: { id: task?.id, name, jd, status: task?.status ?? "active", sources, techKeywords: effectiveTechKeywords,
-          companyKeywords: split(companies), signalKeywords: split(signals), excludeKeywords: split(excludes),
-          authorBlacklist: split(authorBlacklist), companyBlacklist: split(companyBlacklist), schedule, timeRange, scheduleEnabled: schedule !== "仅手动运行" },
-      }),
-    });
-    setSaving(false);
-    if (response.ok) await onCreated();
+    try {
+      const response = await fetch("/api/state", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: task ? "updateTask" : "createTask",
+          task: { id: task?.id, name, jd, status: task?.status ?? "active", sources, techKeywords: effectiveTechKeywords,
+            companyKeywords: split(companies), signalKeywords: split(signals), excludeKeywords: split(excludes),
+            authorBlacklist: split(authorBlacklist), companyBlacklist: split(companyBlacklist), schedule, timeRange, scheduleEnabled: schedule !== "仅手动运行" },
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) { setFormError(result.error ?? "保存失败，请稍后重试"); return; }
+      await onCreated();
+    } catch { setFormError("网络异常，任务未保存"); }
+    finally { setSaving(false); }
   }
 
   return (
@@ -613,6 +632,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
           <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
           <fieldset><legend>数据源</legend><div className="source-checks">{ALL_SOURCES.map((source) => <label key={source}><input type="checkbox" checked={sources.includes(source)} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div></fieldset>
+          {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>
       </section>
