@@ -91,11 +91,11 @@ const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EETOP", "EDA365"];
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
-  { id: "overview", label: "情报概览", icon: "⌁" },
-  { id: "tasks", label: "检索任务", icon: "▣" },
-  { id: "leads", label: "线索工作台", icon: "◇" },
-  { id: "runs", label: "运行日志", icon: "↻" },
-  { id: "sources", label: "数据源", icon: "◎" },
+  { id: "overview", label: "情报概览", icon: "OV" },
+  { id: "tasks", label: "检索任务", icon: "TS" },
+  { id: "leads", label: "线索工作台", icon: "LD" },
+  { id: "runs", label: "运行日志", icon: "RN" },
+  { id: "sources", label: "数据源", icon: "DS" },
 ];
 
 function initials(name: string) {
@@ -239,7 +239,7 @@ export default function Home() {
   if (loading) {
     return (
       <main className="loading-screen" role="status">
-        <div className="brand-mark large">芯</div>
+        <div className="brand-mark large">XT</div>
         <strong>芯探正在装载情报工作台</strong>
         <span>正在初始化任务、线索与数据源状态…</span>
       </main>
@@ -261,8 +261,8 @@ export default function Home() {
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark">X</div>
-          <div><strong>芯探</strong><span>XINTAN INTELLIGENCE</span></div>
+          <div className="brand-mark">XT</div>
+          <div><strong>XINTAN</strong><span>TALENT INTELLIGENCE</span></div>
         </div>
         <nav aria-label="主导航">
           {NAV_ITEMS.map((item) => (
@@ -278,15 +278,15 @@ export default function Home() {
         </nav>
         <div className="sidebar-footer">
           <div className="system-pulse"><span />SYSTEM OPERATIONAL</div>
-          <p>Public & authorized intelligence</p>
-          <small>PRIVATE BETA · v0.3</small>
+          <p>Public-source intelligence</p>
+          <small>PRIVATE WORKSPACE · v0.4</small>
         </div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">CHIP TALENT INTELLIGENCE</p>
+            <p className="eyebrow">TALENT SIGNAL OPERATIONS</p>
             <h1>{NAV_ITEMS.find((item) => item.id === view)?.label}</h1>
           </div>
           <div className="top-actions">
@@ -392,8 +392,8 @@ function Overview({
     <>
       <section className="hero-panel">
         <div className="hero-copy">
-          <div className="live-label"><span />INTELLIGENCE ENGINE ONLINE</div>
-          <h2>将公开信号，转化为<br /><em>可执行的人才情报。</em></h2>
+          <div className="live-label"><span />INTELLIGENCE ENGINE · ONLINE</div>
+          <h2>把开放网络信号，<br /><em>变成招聘判断。</em></h2>
           <p>把 JD 变成持续运行的跨平台检索任务。自动过滤噪声、识别人才流动与企业异动，并为每一条判断保留可追溯证据。</p>
           <div className="hero-actions">
             <button className="light-button" onClick={onCreate}>从 JD 创建任务 →</button>
@@ -401,12 +401,12 @@ function Overview({
           </div>
         </div>
         <div className="hero-visual" aria-label="今日新增线索统计">
-          <div className="signal-orbit orbit-one" />
-          <div className="signal-orbit orbit-two" />
-          <div className="hero-score"><strong>{data.leads.length}</strong><span>ACTIVE SIGNALS</span></div>
-          <div className="floating-signal signal-a"><b>A</b><span>强求职信号</span></div>
-          <div className="floating-signal signal-b"><b>+</b><span>团队扩招</span></div>
-          <div className="floating-signal signal-c"><b>!</b><span>流片异动</span></div>
+          <div className="hero-terminal">
+            <div className="terminal-head"><span>LIVE SIGNAL INDEX</span><i>● ONLINE</i></div>
+            <div className="terminal-score"><strong>{data.leads.length}</strong><span>ACTIVE SIGNALS</span><em>+{data.leads.filter((lead) => lead.priority === "A").length} HIGH PRIORITY</em></div>
+            <div className="terminal-bars">{[34, 58, 43, 72, 49, 86, 64, 92, 76, 100].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
+            <div className="terminal-feed"><span><i />人才流动信号 <b>91</b></span><span><i />团队扩张信号 <b>86</b></span><span><i />项目变动信号 <b>76</b></span></div>
+          </div>
         </div>
       </section>
 
