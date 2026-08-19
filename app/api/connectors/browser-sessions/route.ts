@@ -11,13 +11,13 @@ export async function GET() {
   await ensureDatabase();
   const db = getD1();
   const settings = await loadConnectorSettings(db);
-  if (!settings?.endpoint) return Response.json({ error: "请先连接这台电脑的 Agent" }, { status: 400 });
+  if (!settings?.endpoint) return Response.json({ error: "请先启动并连接本地电脑助手" }, { status: 400 });
   try {
     const response = await fetch(`${settings.endpoint}/v1/browser-sessions`, {
       headers: authHeaders(settings.token_secret), signal: AbortSignal.timeout(12_000),
     });
-    if (response.status === 404) return Response.json({ error: "当前 Agent 尚未提供浏览器登录状态接口" }, { status: 501 });
-    if (!response.ok) throw new Error(`Agent 返回 HTTP ${response.status}`);
+    if (response.status === 404) return Response.json({ error: "当前电脑助手不支持登录状态检测" }, { status: 501 });
+    if (!response.ok) throw new Error(`电脑助手返回 HTTP ${response.status}`);
     const payload = await response.json() as { sessions?: AgentSession[] };
     const sessions = COMPUTER_SOURCES.map((platform) => {
       const session = payload.sessions?.find((item) => item.platform === platform);
@@ -37,7 +37,7 @@ export async function GET() {
 export async function POST(request: Request) {
   await ensureDatabase();
   const settings = await loadConnectorSettings(getD1());
-  if (!settings?.endpoint) return Response.json({ error: "请先连接这台电脑的 Agent" }, { status: 400 });
+  if (!settings?.endpoint) return Response.json({ error: "请先启动并连接本地电脑助手" }, { status: 400 });
   const payload = await request.json() as { platform?: string };
   const platform = String(payload.platform ?? "");
   if (!COMPUTER_SOURCES.includes(platform)) return Response.json({ error: "不支持的平台" }, { status: 400 });
@@ -47,8 +47,8 @@ export async function POST(request: Request) {
       body: JSON.stringify({ platform, mode: "interactive", reuseExistingProfile: true }),
       signal: AbortSignal.timeout(12_000),
     });
-    if (response.status === 404) return Response.json({ error: "当前 Agent 尚未提供打开登录页面接口" }, { status: 501 });
-    if (!response.ok) throw new Error(`Agent 返回 HTTP ${response.status}`);
+    if (response.status === 404) return Response.json({ error: "当前电脑助手不支持打开登录页面" }, { status: 501 });
+    if (!response.ok) throw new Error(`电脑助手返回 HTTP ${response.status}`);
     return Response.json({ ok: true, message: `已通知电脑打开${platform}，请在电脑上完成登录` });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "无法通知电脑打开平台" }, { status: 502 });

@@ -19,12 +19,12 @@ export type ConnectorSettingRow = {
 export function validateAgentEndpoint(value: string) {
   if (!value) return "";
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error("Agent 地址格式不正确"); }
-  if (url.protocol !== "https:") throw new Error("Agent 地址必须使用公网 HTTPS");
+  try { url = new URL(value); } catch { throw new Error("电脑助手地址格式不正确"); }
+  if (url.protocol !== "https:") throw new Error("电脑助手连接地址必须使用安全 HTTPS");
   const host = url.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".local") || host === "0.0.0.0" || host === "127.0.0.1" || host === "::1" ||
     /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
-    throw new Error("Agent 地址不能指向本机或内网，请使用安全隧道提供公网 HTTPS 地址");
+    throw new Error("云端暂时无法直连本机地址，请使用电脑助手提供的安全连接地址");
   }
   return url.toString().replace(/\/$/, "");
 }

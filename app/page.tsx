@@ -418,7 +418,7 @@ function Overview({
         <div className="quickstart-head"><div><p className="eyebrow">GET STARTED</p><h3>第一次使用？按这三步完成一次检索</h3></div><span>预计 3 分钟</span></div>
         <div className="quickstart-steps">
           <button onClick={onCreate}><b>01</b><span><strong>导入 JD</strong><small>自动拆解技术栈、企业和求职信号</small></span><em>{activeTasks} 个任务</em></button>
-          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>连接这台电脑</strong><small>Agent 复用浏览器里已经登录的平台账号</small></span><em>{readySources}/6 已就绪</em></button>
+          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>连接这台电脑</strong><small>电脑助手复用浏览器里已经登录的平台账号</small></span><em>{readySources}/6 已就绪</em></button>
           <button onClick={() => onNavigate("leads")}><b>03</b><span><strong>审核线索</strong><small>查看原文证据，确认高价值候选人</small></span><em>{pendingLeads} 条待审核</em></button>
         </div>
       </section>
@@ -621,7 +621,7 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
 
   async function testConnection() {
     if (!(await saveSettings(false))) return;
-    setTesting(true); setMessage("正在请求 Agent /health …");
+    setTesting(true); setMessage("正在连接电脑助手…");
     try {
       const response = await fetch("/api/connectors/settings", { method: "POST" });
       const result = await response.json() as { error?: string; message?: string };
@@ -690,9 +690,10 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
 }
 
 function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]>; onChanged: () => Promise<void> }) {
-  const completedJobs = jobs.filter((job) => job.status === "completed").length;
-  const waitingJobs = jobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
-  const liveJob = jobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)) ?? jobs[0];
+  const latestJobs = jobs.filter((job, index) => jobs.findIndex((candidate) => candidate.taskId === job.taskId && candidate.source === job.source) === index);
+  const completedJobs = latestJobs.filter((job) => job.status === "completed").length;
+  const waitingJobs = latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
+  const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status));
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [heartbeatClock, setHeartbeatClock] = useState(0);
   const lastHeartbeat = liveJob?.updatedAt ? Date.parse(liveJob.updatedAt) : 0;
@@ -703,18 +704,18 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }, [onChanged]);
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过你现有的电脑 Agent 安全派发任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
+      <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过本地电脑助手执行任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
       <div className="connector-readiness">
-        <div><span>LOCAL BROWSER AGENT</span><strong>{waitingJobs ? "等待连接电脑" : "电脑连接正常"}</strong><p>电脑浏览器提前登录平台，Agent 复用现有会话。网页端不接触平台密码，只派发打开、搜索、滚动与采集动作。</p></div>
-        <div className="readiness-steps"><span className="done">01 · 启动电脑 Agent</span><span className="done">02 · 浏览器预先登录</span><span className={waitingJobs ? "current" : "done"}>03 · 检测登录状态</span><span>04 · 运行检索任务</span></div>
+        <div><span>LOCAL COMPUTER ASSISTANT</span><strong>{waitingJobs ? "电脑助手尚未连接" : "电脑连接正常"}</strong><p>{waitingJobs ? "当前任务没有派发，也没有操作你的电脑。请先启动本地电脑助手。" : "电脑浏览器提前登录平台，助手复用现有会话；网页端不接触平台密码。"}</p></div>
+        <div className="readiness-steps"><span className={waitingJobs ? "current" : "done"}>01 · 启动电脑助手</span><span className={waitingJobs ? "" : "done"}>02 · 浏览器预先登录</span><span className={waitingJobs ? "" : "done"}>03 · 检查登录状态</span><span>04 · 运行检索任务</span></div>
       </div>
       <ConnectorSettingsPanel onChanged={onChanged} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
         {liveJob ? <div className="live-console-body">
-          <div className={`browser-stage ${streamStale ? "stream-stale" : ""}`} ref={stageRef}>{liveJob.liveViewUrl ? <iframe src={liveJob.liveViewUrl} title={`${liveJob.source} 电脑实时同屏`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allow="fullscreen; autoplay" allowFullScreen /> : <div className="screen-placeholder blocked"><span>SCREEN REQUIRED</span><strong>实时同屏未建立，任务不可执行</strong><p>Agent 必须先返回低延迟 liveViewUrl。建立画面后，鼠标、点击、输入、滚动和页面跳转都会在这里同步显示。</p></div>}{streamStale && <div className="stream-alert"><strong>画面心跳已中断</strong><span>Agent 应立即暂停电脑操作，恢复画面后再继续。</span></div>}</div>
-          <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待 Agent 状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
-        </div> : <div className="live-empty"><strong>还没有电脑 Agent 任务</strong><span>先建立电脑实时同屏并检查平台登录状态，再运行一次包含社媒平台的任务。</span></div>}
+          <div className={`browser-stage ${streamStale ? "stream-stale" : ""}`} ref={stageRef}>{liveJob.liveViewUrl ? <iframe src={liveJob.liveViewUrl} title={`${liveJob.source} 电脑实时同屏`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allow="fullscreen; autoplay" allowFullScreen /> : <div className="screen-placeholder blocked"><span>SCREEN REQUIRED</span><strong>实时同屏未建立，任务已暂停</strong><p>电脑助手建立实时画面后，鼠标、点击、输入、滚动和页面跳转才会在这里同步显示。</p></div>}{streamStale && <div className="stream-alert"><strong>画面心跳已中断</strong><span>电脑助手已暂停操作，恢复画面后才能继续。</span></div>}</div>
+          <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
+        </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "任务没有派发，也没有操作你的电脑。启动并连接本地助手后才能运行。" : "运行包含社媒平台的任务后，电脑画面会显示在这里。"}</span></div>}
       </section>
       <div className="source-grid">
         {sources.map((source) => (
@@ -823,7 +824,7 @@ function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; on
           <p className="guide-intro">不用先研究所有菜单。创建一个任务、运行一次检索、审核一条线索，就能理解完整工作流。</p>
           <div className="guide-journey">
             <article><span>01</span><div><h3>粘贴客户 JD</h3><p>系统自动识别职位、技术栈、目标企业、求职信号和排除词，你只需检查结果。</p><button onClick={onCreate}>创建检索任务 →</button></div></article>
-            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；Agent 会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("sources")}>检查电脑与登录状态 →</button></div></article>
+            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；电脑助手会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("sources")}>检查电脑与登录状态 →</button></div></article>
             <article><span>03</span><div><h3>人工复核高价值线索</h3><p>优先看 A 级线索，核对公开原文、作者和来源链接，再标记确认或误报。</p><button onClick={() => onNavigate("leads")}>打开线索工作台 →</button></div></article>
           </div>
           <div className="guide-terms"><b>三个概念</b><span><strong>任务</strong>＝一套持续运行的检索条件</span><span><strong>线索</strong>＝经过过滤和分析的公开内容</span><span><strong>运行日志</strong>＝每次获取、过滤、去重的审计记录</span></div>

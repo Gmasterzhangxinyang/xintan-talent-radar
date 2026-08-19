@@ -54,7 +54,7 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
   }
   if (!endpoint) {
     await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error, current_action, updated_at) VALUES (?, ?, ?, 'awaiting_config', ?, ?, ?, ?)")
-      .bind(id, args.task.id, args.source, now, "请先在“数据源 → 连接设置”配置电脑 Agent", "等待配置", now).run();
+      .bind(id, args.task.id, args.source, now, "请先启动并连接本地电脑助手", "尚未派发", now).run();
     return { id, status: "awaiting_config" };
   }
   const queries = unique([...parseStringArray(args.task.tech_keywords), ...parseStringArray(args.task.company_keywords), ...parseStringArray(args.task.signal_keywords)]);
@@ -83,7 +83,7 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
       await fetch(`${endpoint}/v1/search-tasks/${id}/cancel`, {
         method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(5_000),
       }).catch(() => undefined);
-      throw new Error("Agent 未返回实时同屏地址，任务已阻止执行");
+      throw new Error("电脑助手未建立实时同屏，任务没有执行");
     }
     await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, progress, current_action, live_view_url, updated_at) VALUES (?, ?, ?, 'dispatched', ?, 5, ?, ?, ?)")
       .bind(id, args.task.id, args.source, now, `正在启动${args.source}浏览器`, liveViewUrl, now).run();

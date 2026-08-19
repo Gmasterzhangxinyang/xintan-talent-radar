@@ -23,7 +23,7 @@ export async function PUT(request: Request) {
   const payload = await request.json() as { endpoint?: string; token?: string; callbackSecret?: string; enabledSources?: string[] };
   let endpoint = "";
   try { endpoint = validateAgentEndpoint(String(payload.endpoint ?? "").trim()); }
-  catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Agent 地址无效" }, { status: 400 }); }
+  catch (error) { return Response.json({ error: error instanceof Error ? error.message : "电脑助手地址无效" }, { status: 400 }); }
   const enabledSources = Array.isArray(payload.enabledSources)
     ? [...new Set(payload.enabledSources.filter((source) => COMPUTER_SOURCES.includes(source)))]
     : COMPUTER_SOURCES;
@@ -50,23 +50,23 @@ export async function POST() {
   await ensureDatabase();
   const db = getD1();
   const settings = await loadConnectorSettings(db);
-  if (!settings?.endpoint) return Response.json({ error: "请先保存 Agent 地址" }, { status: 400 });
+  if (!settings?.endpoint) return Response.json({ error: "请先启动并连接电脑助手" }, { status: 400 });
   const now = new Date().toISOString();
   try {
     const response = await fetch(`${settings.endpoint}/health`, {
       headers: settings.token_secret ? { Authorization: `Bearer ${settings.token_secret}` } : {},
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new Error(`Agent 健康检查返回 HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`电脑助手连接失败（HTTP ${response.status}）`);
     const health = await response.json().catch(() => ({})) as { liveViewUrl?: string; viewerUrl?: string; capabilities?: string[] };
     const requestedLiveUrl = String(health.liveViewUrl ?? health.viewerUrl ?? "");
     const liveViewUrl = requestedLiveUrl ? validateAgentEndpoint(requestedLiveUrl) : "";
     const capabilities = Array.isArray(health.capabilities) ? health.capabilities.filter((item) => typeof item === "string").slice(0, 20) : [];
-    if (!liveViewUrl) throw new Error("Agent 已在线，但未提供实时同屏地址；请启用屏幕流后重试");
+    if (!liveViewUrl) throw new Error("电脑助手已在线，但实时画面尚未建立");
     await db.batch([
       db.prepare("UPDATE connector_settings SET status='connected', last_test_at=?, last_error='', live_view_url=?, capabilities=?, updated_at=? WHERE id=?")
         .bind(now, liveViewUrl, JSON.stringify(capabilities), now, COMPUTER_AGENT_ID),
-      db.prepare("UPDATE sources SET status='已连接', last_check=?, note='电脑 Agent 健康检查通过' WHERE id IN ('douyin','weibo','xiaohongshu','zhihu')").bind(now),
+      db.prepare("UPDATE sources SET status='已连接', last_check=?, note='电脑助手连接正常' WHERE id IN ('douyin','weibo','xiaohongshu','zhihu')").bind(now),
     ]);
     return Response.json({ ok: true, status: "connected", message: "连接成功，实时电脑同屏已建立", testedAt: now, liveViewUrl, capabilities });
   } catch (error) {

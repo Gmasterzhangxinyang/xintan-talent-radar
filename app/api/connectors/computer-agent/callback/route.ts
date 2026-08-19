@@ -39,14 +39,14 @@ export async function POST(request: Request) {
     const now = new Date().toISOString();
     if (status === "running" && !liveViewUrl && !job.live_view_url) {
       await db.prepare("UPDATE connector_jobs SET status='failed', error=?, current_action=?, updated_at=? WHERE id=?")
-        .bind("实时同屏未建立，已阻止 Agent 继续执行", "等待恢复电脑画面", now, payload.jobId).run();
+        .bind("实时同屏未建立，电脑助手已暂停操作", "等待恢复电脑画面", now, payload.jobId).run();
       return Response.json({ error: "实时同屏是强制要求，请先恢复 liveViewUrl" }, { status: 409 });
     }
     await db.prepare(`UPDATE connector_jobs SET status=?, progress=?, current_action=?,
       live_view_url=CASE WHEN ?='' THEN live_view_url ELSE ? END,
       screenshot_url=CASE WHEN ?='' THEN screenshot_url ELSE ? END,
       error=?, updated_at=? WHERE id=? AND task_id=?`)
-      .bind(status, progress, String(payload.action ?? "Agent 正在执行"), liveViewUrl, liveViewUrl,
+      .bind(status, progress, String(payload.action ?? "电脑助手正在执行"), liveViewUrl, liveViewUrl,
         screenshotUrl, screenshotUrl, String(payload.error ?? ""), now, payload.jobId, payload.taskId).run();
     return Response.json({ ok: true, event: "progress", updatedAt: now });
   }
