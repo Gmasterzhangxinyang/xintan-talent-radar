@@ -74,7 +74,7 @@ export async function runTask(db: D1Database, taskId: string, callbackBase: stri
   for (const source of parseStringArray(task.sources)) {
     if (SOCIAL_SOURCES.has(source)) {
       const job = await dispatchComputerAgent({ db, task, source, callbackBase });
-      messages.push(`${source}:${job.status === "dispatched" ? "已派发" : job.status === "awaiting_config" ? "待接入电脑Agent" : "派发失败"}`);
+      messages.push(`${source}:${job.status === "dispatched" ? "已派发" : job.status === "awaiting_config" ? "待接入电脑Agent" : job.status === "disabled" ? "已停用" : "派发失败"}`);
       continue;
     }
     try {

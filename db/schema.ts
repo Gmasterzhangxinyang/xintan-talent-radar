@@ -123,6 +123,25 @@ export const connectorJobs = sqliteTable(
     completedAt: text("completed_at"),
     fetched: integer("fetched").notNull().default(0),
     error: text("error").notNull().default(""),
+    progress: integer("progress").notNull().default(0),
+    currentAction: text("current_action").notNull().default(""),
+    liveViewUrl: text("live_view_url").notNull().default(""),
+    screenshotUrl: text("screenshot_url").notNull().default(""),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [index("idx_connector_jobs_task_status").on(table.taskId, table.status)],
 );
+
+export const connectorSettings = sqliteTable("connector_settings", {
+  id: text("id").primaryKey(),
+  endpoint: text("endpoint").notNull().default(""),
+  tokenSecret: text("token_secret").notNull().default(""),
+  callbackSecretHash: text("callback_secret_hash").notNull().default(""),
+  enabledSources: text("enabled_sources").notNull().default("[]"),
+  status: text("status").notNull().default("not_configured"),
+  lastTestAt: text("last_test_at"),
+  lastError: text("last_error").notNull().default(""),
+  liveViewUrl: text("live_view_url").notNull().default(""),
+  capabilities: text("capabilities").notNull().default("[]"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

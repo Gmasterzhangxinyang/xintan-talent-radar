@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { CandidateItem, TaskRecord } from "./types";
 import { parseStringArray, unique } from "./json";
+import { loadConnectorSettings, validateAgentEndpoint } from "./connector-settings";
 
 const FORUMS: Record<string, string> = {
   EETOP: "https://bbs.eetop.cn/",
@@ -41,13 +42,19 @@ export async function collectPublicForum(source: string, task: TaskRecord): Prom
 
 export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRecord; source: string; callbackBase: string }) {
   const config = env as unknown as Record<string, unknown>;
-  const endpoint = typeof config.COMPUTER_AGENT_URL === "string" ? config.COMPUTER_AGENT_URL.replace(/\/$/, "") : "";
-  const token = typeof config.COMPUTER_AGENT_TOKEN === "string" ? config.COMPUTER_AGENT_TOKEN : "";
+  const saved = await loadConnectorSettings(args.db);
+  const endpoint = saved?.endpoint || (typeof config.COMPUTER_AGENT_URL === "string" ? config.COMPUTER_AGENT_URL.replace(/\/$/, "") : "");
+  const token = saved?.token_secret || (typeof config.COMPUTER_AGENT_TOKEN === "string" ? config.COMPUTER_AGENT_TOKEN : "");
   const id = `job-${crypto.randomUUID()}`;
   const now = new Date().toISOString();
+  if (saved && !saved.enabledSources.includes(args.source)) {
+    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error, current_action, updated_at) VALUES (?, ?, ?, 'disabled', ?, ?, ?, ?)")
+      .bind(id, args.task.id, args.source, now, "该平台已在连接设置中停用", "未派发", now).run();
+    return { id, status: "disabled" };
+  }
   if (!endpoint) {
-    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error) VALUES (?, ?, ?, 'awaiting_config', ?, ?)")
-      .bind(id, args.task.id, args.source, now, "等待配置 COMPUTER_AGENT_URL").run();
+    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error, current_action, updated_at) VALUES (?, ?, ?, 'awaiting_config', ?, ?, ?, ?)")
+      .bind(id, args.task.id, args.source, now, "请先在“数据源 → 连接设置”配置电脑 Agent", "等待配置", now).run();
     return { id, status: "awaiting_config" };
   }
   const queries = unique([...parseStringArray(args.task.tech_keywords), ...parseStringArray(args.task.company_keywords), ...parseStringArray(args.task.signal_keywords)]);
@@ -63,13 +70,17 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
       body: JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 160)}`);
-    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at) VALUES (?, ?, ?, 'dispatched', ?)")
-      .bind(id, args.task.id, args.source, now).run();
-    return { id, status: "dispatched" };
+    const accepted = await response.json().catch(() => ({})) as { liveViewUrl?: string; viewerUrl?: string };
+    let liveViewUrl = saved?.live_view_url ?? "";
+    const proposedLiveUrl = String(accepted.liveViewUrl ?? accepted.viewerUrl ?? "");
+    if (proposedLiveUrl) liveViewUrl = validateAgentEndpoint(proposedLiveUrl);
+    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, progress, current_action, live_view_url, updated_at) VALUES (?, ?, ?, 'dispatched', ?, 5, ?, ?, ?)")
+      .bind(id, args.task.id, args.source, now, `正在启动${args.source}浏览器`, liveViewUrl, now).run();
+    return { id, status: "dispatched", liveViewUrl };
   } catch (error) {
     const message = error instanceof Error ? error.message : "派发失败";
-    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error) VALUES (?, ?, ?, 'failed', ?, ?)")
-      .bind(id, args.task.id, args.source, now, message).run();
+    await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, error, current_action, updated_at) VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)")
+      .bind(id, args.task.id, args.source, now, message, "派发失败", now).run();
     return { id, status: "failed", error: message };
   }
 }

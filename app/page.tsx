@@ -74,7 +74,17 @@ type AppState = {
   leads: Lead[];
   runs: Run[];
   sources: Source[];
-  connectorJobs?: Array<{ id: string; taskId: string; source: string; status: string; dispatchedAt: string; fetched: number; error: string }>;
+  connectorJobs?: Array<{
+    id: string; taskId: string; source: string; status: string; dispatchedAt: string;
+    fetched: number; error: string; progress: number; currentAction: string;
+    liveViewUrl: string; screenshotUrl: string; updatedAt?: string;
+  }>;
+};
+
+type ConnectorSettingsState = {
+  endpoint: string; hasToken: boolean; hasCallbackSecret: boolean; enabledSources: string[];
+  status: string; lastTestAt: string | null; lastError: string; liveViewUrl: string;
+  capabilities: string[];
 };
 
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
@@ -326,7 +336,7 @@ export default function Home() {
             />
           )}
           {view === "runs" && <RunsView runs={data.runs} />}
-          {view === "sources" && <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} />}
+          {view === "sources" && <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} onChanged={loadState} />}
         </div>
       </section>
 
@@ -376,7 +386,7 @@ function Overview({
   onCreate: () => void;
 }) {
   const activeTasks = data.tasks.filter((task) => task.status === "active").length;
-  const readySources = data.sources.filter((source) => ["可连接", "可执行"].includes(source.status)).length;
+  const readySources = data.sources.filter((source) => ["可连接", "可执行", "已连接"].includes(source.status)).length;
   const pendingLeads = data.leads.filter((lead) => lead.reviewStatus === "待审核").length;
   return (
     <>
@@ -439,7 +449,7 @@ function Overview({
               <div className="source-mini" key={source.id}>
                 <span className="source-logo">{initials(source.name)}</span>
                 <span><b>{source.name}</b><small>{source.mode}</small></span>
-                <i className={`health-dot ${["可连接", "可执行"].includes(source.status) ? "healthy" : source.status.includes("待") ? "warning" : "testing"}`} />
+                <i className={`health-dot ${["可连接", "可执行", "已连接"].includes(source.status) ? "healthy" : source.status.includes("待") ? "warning" : "testing"}`} />
               </div>
             ))}
           </div>
@@ -546,9 +556,97 @@ function RunsView({ runs }: { runs: Run[] }) {
   );
 }
 
-function SourcesView({ sources, jobs }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]> }) {
+const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
+  endpoint: "", hasToken: false, hasCallbackSecret: false, enabledSources: ["抖音", "微博", "小红书", "知乎"],
+  status: "not_configured", lastTestAt: null, lastError: "", liveViewUrl: "", capabilities: [],
+};
+
+function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> }) {
+  const [settings, setSettings] = useState(EMPTY_CONNECTOR_SETTINGS);
+  const [endpoint, setEndpoint] = useState("");
+  const [token, setToken] = useState("");
+  const [callbackSecret, setCallbackSecret] = useState("");
+  const [enabledSources, setEnabledSources] = useState<string[]>(EMPTY_CONNECTOR_SETTINGS.enabledSources);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function loadSettings() {
+    const response = await fetch("/api/connectors/settings", { cache: "no-store" });
+    const result = await response.json() as ConnectorSettingsState & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "连接设置读取失败");
+    setSettings(result);
+    setEndpoint(result.endpoint);
+    setEnabledSources(result.enabledSources);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/connectors/settings", { cache: "no-store" }).then(async (response) => {
+      const result = await response.json() as ConnectorSettingsState & { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "连接设置读取失败");
+      if (!cancelled) {
+        setSettings(result); setEndpoint(result.endpoint); setEnabledSources(result.enabledSources); setLoading(false);
+      }
+    }).catch((error) => { if (!cancelled) { setMessage(error instanceof Error ? error.message : "连接设置读取失败"); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function saveSettings(showMessage = true) {
+    setSaving(true); setMessage("");
+    try {
+      const response = await fetch("/api/connectors/settings", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint, token, callbackSecret, enabledSources }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "保存失败");
+      setToken(""); setCallbackSecret("");
+      await loadSettings(); await onChanged();
+      if (showMessage) setMessage("配置已安全保存，请执行连通性测试");
+      return true;
+    } catch (error) { setMessage(error instanceof Error ? error.message : "保存失败"); return false; }
+    finally { setSaving(false); }
+  }
+
+  async function testConnection() {
+    if (!(await saveSettings(false))) return;
+    setTesting(true); setMessage("正在请求 Agent /health …");
+    try {
+      const response = await fetch("/api/connectors/settings", { method: "POST" });
+      const result = await response.json() as { error?: string; message?: string };
+      if (!response.ok) throw new Error(result.error ?? "连接失败");
+      await loadSettings(); await onChanged(); setMessage(result.message ?? "连接成功");
+    } catch (error) { await loadSettings(); await onChanged(); setMessage(error instanceof Error ? error.message : "连接失败"); }
+    finally { setTesting(false); }
+  }
+
+  const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "已保存，待测试" : "未配置";
+  return (
+    <section className="settings-panel" id="connector-settings">
+      <div className="settings-head"><div><p className="eyebrow">CONNECTION SETTINGS</p><h3>电脑 Agent 连接设置</h3><span>配置一次，后续检索任务会自动派发到你的电脑接管产品。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
+      <div className="settings-grid">
+        <label className="settings-field wide"><span>Agent 公网地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /><small>必须是公网 HTTPS；本机 Agent 可通过安全隧道暴露。测试会请求 GET /health。</small></label>
+        <label className="settings-field"><span>访问 Token</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "可选"} /><small>只写字段，保存后不会回显。</small></label>
+        <label className="settings-field"><span>回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "建议设置"} /><small>Agent 回写进度和结果时使用。</small></label>
+      </div>
+      <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
+      <div className="settings-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存配置"}</button><button className="primary-button" disabled={!endpoint || saving || testing} onClick={() => void testConnection()}>{testing ? "正在测试…" : "测试连接"}</button>{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">打开电脑实时画面 ↗</a>}</div>
+      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "Agent 在线" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近测试：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status === "connected" && !settings.liveViewUrl && <span>连接已成功，但 Agent 尚未在 /health 返回 liveViewUrl，暂时无法显示实时电脑画面。</span>}</div>}
+      <div className="contract-note"><b>AGENT CONTRACT</b><span>健康检查 GET /health · 接收任务 POST /v1/search-tasks · 进度与结果 POST 本系统 callback。Agent 返回 liveViewUrl 后即可观看真实浏览器操作。</span></div>
+    </section>
+  );
+}
+
+function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]>; onChanged: () => Promise<void> }) {
   const completedJobs = jobs.filter((job) => job.status === "completed").length;
   const waitingJobs = jobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
+  const liveJob = jobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)) ?? jobs[0];
+  useEffect(() => {
+    const timer = window.setInterval(() => { void onChanged(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [onChanged]);
   return (
     <section>
       <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过你现有的电脑 Agent 安全派发任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
@@ -556,13 +654,21 @@ function SourcesView({ sources, jobs }: { sources: Source[]; jobs: NonNullable<A
         <div><span>COMPUTER AGENT</span><strong>{waitingJobs ? "等待接入" : "连接状态正常"}</strong><p>配置服务地址、回调密钥和平台登录账号后，抖音/微博/小红书/知乎任务会自动派发并回写结果。</p></div>
         <div className="readiness-steps"><span className="done">01 · 数据协议</span><span className="done">02 · 安全回调</span><span className={waitingJobs ? "current" : "done"}>03 · Agent 地址</span><span>04 · 账号实测</span></div>
       </div>
+      <ConnectorSettingsPanel onChanged={onChanged} />
+      <section className="live-console">
+        <div className="live-console-head"><div><p className="eyebrow">LIVE EXECUTION</p><h3>电脑执行现场</h3><span>每 5 秒自动更新 Agent 当前动作和画面。</span></div>{liveJob && <span className={`job-state ${liveJob.status}`}>{liveJob.status === "running" ? "执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div>
+        {liveJob ? <div className="live-console-body">
+          <div className="browser-stage">{liveJob.liveViewUrl || liveJob.screenshotUrl ? <iframe src={liveJob.liveViewUrl || liveJob.screenshotUrl} title={`${liveJob.source} 实时操作画面`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" /> : <div className="screen-placeholder"><span>LIVE</span><strong>等待 Agent 提供实时画面</strong><p>任务已经记录，但 Agent 还没有回传 liveViewUrl。接通实时画面协议后，这里会显示浏览器正在操作的平台页面。</p></div>}</div>
+          <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待 Agent 状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
+        </div> : <div className="live-empty"><strong>还没有电脑 Agent 任务</strong><span>先保存连接设置并测试成功，再到“检索任务”运行一次包含社媒平台的任务。</span></div>}
+      </section>
       <div className="source-grid">
         {sources.map((source) => (
           <article className="source-card" key={source.id}>
-            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行"].includes(source.status) ? "connected" : source.status.includes("待") ? "login" : "testing"}`}>{source.status}</span></div>
+            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接"].includes(source.status) ? "connected" : source.status.includes("待") ? "login" : "testing"}`}>{source.status}</span></div>
             <dl><div><dt>接入方式</dt><dd>{source.mode}</dd></div><div><dt>最近检查</dt><dd>{source.lastCheck}</dd></div></dl>
             <p>{source.note}</p>
-            <span className="source-action">{["可连接", "可执行"].includes(source.status) ? "READY TO RUN" : "CONFIGURATION REQUIRED"}</span>
+            <span className="source-action">{["可连接", "可执行", "已连接"].includes(source.status) ? "READY TO RUN" : "CONFIGURATION REQUIRED"}</span>
           </article>
         ))}
       </div>

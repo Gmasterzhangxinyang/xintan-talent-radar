@@ -60,9 +60,19 @@ export async function ensureDatabase() {
     db.prepare(`CREATE TABLE IF NOT EXISTS connector_jobs (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, source TEXT NOT NULL,
       status TEXT NOT NULL, dispatched_at TEXT NOT NULL, completed_at TEXT,
-      fetched INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT ''
+      fetched INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+      progress INTEGER NOT NULL DEFAULT 0, current_action TEXT NOT NULL DEFAULT '',
+      live_view_url TEXT NOT NULL DEFAULT '', screenshot_url TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_connector_jobs_task_status ON connector_jobs(task_id, status)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS connector_settings (
+      id TEXT PRIMARY KEY, endpoint TEXT NOT NULL DEFAULT '', token_secret TEXT NOT NULL DEFAULT '',
+      callback_secret_hash TEXT NOT NULL DEFAULT '', enabled_sources TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'not_configured', last_test_at TEXT,
+      last_error TEXT NOT NULL DEFAULT '', live_view_url TEXT NOT NULL DEFAULT '',
+      capabilities TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
   ]);
 
   const taskCount = await db.prepare("SELECT COUNT(*) AS count FROM tasks").first<{ count: number }>();

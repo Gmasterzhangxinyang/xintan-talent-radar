@@ -88,7 +88,9 @@ function normalizeConnectorJob(row: Record<string, unknown>) {
   return {
     id: row.id, taskId: row.task_id, source: row.source, status: row.status,
     dispatchedAt: row.dispatched_at, completedAt: row.completed_at,
-    fetched: row.fetched, error: row.error,
+    fetched: row.fetched, error: row.error, progress: row.progress,
+    currentAction: row.current_action, liveViewUrl: row.live_view_url,
+    screenshotUrl: row.screenshot_url, updatedAt: row.updated_at,
   };
 }
 
