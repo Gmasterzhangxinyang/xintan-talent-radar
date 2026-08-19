@@ -579,6 +579,7 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
   const [sessionLoading, setSessionLoading] = useState(false);
   const [openingPlatform, setOpeningPlatform] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   async function loadSettings() {
     const response = await fetch("/api/connectors/settings", { cache: "no-store" });
@@ -653,18 +654,27 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
     finally { setOpeningPlatform(""); }
   }
 
-  const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "已保存，待测试" : "未配置";
+  const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "等待检测" : "待连接";
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">COMPUTER CONNECTION</p><h3>连接这台已登录平台的电脑</h3><span>账号和 Cookie 保留在电脑浏览器中；本系统不会保存抖音、小红书等平台密码。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
-      <div className="settings-grid">
-        <label className="settings-field wide"><span>电脑 Agent 地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /><small>这是电脑接管产品的连接地址，不是抖音或小红书网址。配置一次即可。</small></label>
-        <label className="settings-field"><span>Agent 访问令牌</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "可选"} /><small>用于网站与电脑 Agent 通信，不是平台账号密码。</small></label>
-        <label className="settings-field"><span>结果回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "建议设置"} /><small>用于安全回写任务进度和采集结果。</small></label>
+      <div className="settings-head"><div><p className="eyebrow">COMPUTER ASSISTANT</p><h3>连接电脑助手</h3><span>先打开电脑上的 AI 接管软件，再连接并检查平台登录状态。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
+      <div className="pair-card">
+        <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
+        <div className="pair-copy"><b>{settings.status === "connected" ? "这台电脑已连接" : "等待连接电脑助手"}</b><p>{settings.status === "connected" ? "实时同屏已建立，可以检查抖音、小红书等平台的登录状态。" : "平台账号和 Cookie 只保留在你的电脑浏览器中，不会上传到本系统。"}</p></div>
+        <div className="pair-actions"><button className="primary-button" disabled={saving || testing || loading} onClick={() => endpoint ? void testConnection() : setShowAdvanced(true)}>{testing ? "正在连接…" : settings.status === "connected" ? "重新检测" : endpoint ? "连接这台电脑" : "首次配对"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}</div>
       </div>
-      <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
-      <div className="settings-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存连接"}</button><button className="primary-button" disabled={!endpoint || saving || testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "检测这台电脑"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑画面 ↗</a>}</div>
-      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "Agent 在线，实时同屏已建立" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近测试：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status !== "connected" && <span>实时同屏未建立前，社媒任务不会执行。</span>}</div>}
+      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "电脑助手在线，实时同屏已建立" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近检测：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status !== "connected" && <span>连接成功后才会执行社媒任务。</span>}</div>}
+      <div className="connection-shortcuts">{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑实时画面 ↗</a>}<button onClick={() => setShowAdvanced((current) => !current)}>{showAdvanced ? "收起高级设置" : "管理员高级设置"}</button></div>
+      {showAdvanced && <div className="advanced-settings">
+        <div className="advanced-head"><b>管理员高级设置</b><span>仅安装和维护电脑助手时使用，普通用户无需修改。</span></div>
+        <div className="settings-grid">
+          <label className="settings-field wide"><span>电脑助手服务地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /></label>
+          <label className="settings-field"><span>访问令牌</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "由管理员填写"} /></label>
+          <label className="settings-field"><span>结果回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "由管理员填写"} /></label>
+        </div>
+        <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
+        <div className="advanced-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存高级设置"}</button></div>
+      </div>}
       <div className="session-matrix">
         <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
         <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
@@ -674,7 +684,7 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
         })}</div>
         {sessionMessage && <div className="session-message">{sessionMessage}</div>}
       </div>
-      <div className="contract-note"><b>HOW IT WORKS</b><span>电脑先登录平台 → Agent 复用现有浏览器 Profile → 任务只负责打开网站、搜索和采集 → 会话过期时提示重新登录。</span></div>
+      <div className="contract-note"><b>HOW IT WORKS</b><span>电脑先登录平台 → 助手复用现有浏览器会话 → 自动打开网站、搜索和采集 → 登录过期时提醒你重新登录。</span></div>
     </section>
   );
 }
