@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type View = "overview" | "tasks" | "leads" | "runs" | "sources";
 
@@ -664,7 +664,7 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
       </div>
       <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
       <div className="settings-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存连接"}</button><button className="primary-button" disabled={!endpoint || saving || testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "检测这台电脑"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑画面 ↗</a>}</div>
-      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "Agent 在线" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近测试：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status === "connected" && !settings.liveViewUrl && <span>连接已成功，但 Agent 尚未在 /health 返回 liveViewUrl，暂时无法显示实时电脑画面。</span>}</div>}
+      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "Agent 在线，实时同屏已建立" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近测试：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status !== "connected" && <span>实时同屏未建立前，社媒任务不会执行。</span>}</div>}
       <div className="session-matrix">
         <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
         <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
@@ -683,8 +683,12 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   const completedJobs = jobs.filter((job) => job.status === "completed").length;
   const waitingJobs = jobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   const liveJob = jobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)) ?? jobs[0];
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [heartbeatClock, setHeartbeatClock] = useState(0);
+  const lastHeartbeat = liveJob?.updatedAt ? Date.parse(liveJob.updatedAt) : 0;
+  const streamStale = Boolean(liveJob && liveJob.status === "running" && lastHeartbeat && heartbeatClock && heartbeatClock - lastHeartbeat > 20_000);
   useEffect(() => {
-    const timer = window.setInterval(() => { void onChanged(); }, 5_000);
+    const timer = window.setInterval(() => { setHeartbeatClock(new Date().getTime()); void onChanged(); }, 5_000);
     return () => window.clearInterval(timer);
   }, [onChanged]);
   return (
@@ -696,11 +700,11 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
       </div>
       <ConnectorSettingsPanel onChanged={onChanged} />
       <section className="live-console">
-        <div className="live-console-head"><div><p className="eyebrow">LIVE EXECUTION</p><h3>电脑执行现场</h3><span>每 5 秒自动更新 Agent 当前动作和画面。</span></div>{liveJob && <span className={`job-state ${liveJob.status}`}>{liveJob.status === "running" ? "执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div>
+        <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
         {liveJob ? <div className="live-console-body">
-          <div className="browser-stage">{liveJob.liveViewUrl || liveJob.screenshotUrl ? <iframe src={liveJob.liveViewUrl || liveJob.screenshotUrl} title={`${liveJob.source} 实时操作画面`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" /> : <div className="screen-placeholder"><span>LIVE</span><strong>等待 Agent 提供实时画面</strong><p>任务已经记录，但 Agent 还没有回传 liveViewUrl。接通实时画面协议后，这里会显示浏览器正在操作的平台页面。</p></div>}</div>
+          <div className={`browser-stage ${streamStale ? "stream-stale" : ""}`} ref={stageRef}>{liveJob.liveViewUrl ? <iframe src={liveJob.liveViewUrl} title={`${liveJob.source} 电脑实时同屏`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allow="fullscreen; autoplay" allowFullScreen /> : <div className="screen-placeholder blocked"><span>SCREEN REQUIRED</span><strong>实时同屏未建立，任务不可执行</strong><p>Agent 必须先返回低延迟 liveViewUrl。建立画面后，鼠标、点击、输入、滚动和页面跳转都会在这里同步显示。</p></div>}{streamStale && <div className="stream-alert"><strong>画面心跳已中断</strong><span>Agent 应立即暂停电脑操作，恢复画面后再继续。</span></div>}</div>
           <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待 Agent 状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
-        </div> : <div className="live-empty"><strong>还没有电脑 Agent 任务</strong><span>先保存连接设置并测试成功，再到“检索任务”运行一次包含社媒平台的任务。</span></div>}
+        </div> : <div className="live-empty"><strong>还没有电脑 Agent 任务</strong><span>先建立电脑实时同屏并检查平台登录状态，再运行一次包含社媒平台的任务。</span></div>}
       </section>
       <div className="source-grid">
         {sources.map((source) => (

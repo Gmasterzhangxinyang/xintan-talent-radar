@@ -62,12 +62,13 @@ export async function POST() {
     const requestedLiveUrl = String(health.liveViewUrl ?? health.viewerUrl ?? "");
     const liveViewUrl = requestedLiveUrl ? validateAgentEndpoint(requestedLiveUrl) : "";
     const capabilities = Array.isArray(health.capabilities) ? health.capabilities.filter((item) => typeof item === "string").slice(0, 20) : [];
+    if (!liveViewUrl) throw new Error("Agent 已在线，但未提供实时同屏地址；请启用屏幕流后重试");
     await db.batch([
       db.prepare("UPDATE connector_settings SET status='connected', last_test_at=?, last_error='', live_view_url=?, capabilities=?, updated_at=? WHERE id=?")
         .bind(now, liveViewUrl, JSON.stringify(capabilities), now, COMPUTER_AGENT_ID),
       db.prepare("UPDATE sources SET status='已连接', last_check=?, note='电脑 Agent 健康检查通过' WHERE id IN ('douyin','weibo','xiaohongshu','zhihu')").bind(now),
     ]);
-    return Response.json({ ok: true, status: "connected", message: "连接成功，Agent 健康检查通过", testedAt: now, liveViewUrl, capabilities });
+    return Response.json({ ok: true, status: "connected", message: "连接成功，实时电脑同屏已建立", testedAt: now, liveViewUrl, capabilities });
   } catch (error) {
     const message = error instanceof Error ? error.message : "连接失败";
     await db.batch([

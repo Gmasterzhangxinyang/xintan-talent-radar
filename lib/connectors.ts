@@ -62,7 +62,11 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     jobId: id, taskId: args.task.id, platform: args.source, queries,
     excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
     fields: ["snippet", "author", "authorId", "publishedAt", "url"],
-    browser: { reuseExistingProfile: true, interactive: true, requireExistingLogin: true },
+    browser: {
+      reuseExistingProfile: true, interactive: true, requireExistingLogin: true,
+      requireLiveView: true, liveViewMode: "webrtc", heartbeatIntervalMs: 5_000,
+      pauseOnViewerDisconnect: true,
+    },
     callbackUrl: `${args.callbackBase}/api/connectors/computer-agent/callback`,
   };
   try {
@@ -75,6 +79,12 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     let liveViewUrl = saved?.live_view_url ?? "";
     const proposedLiveUrl = String(accepted.liveViewUrl ?? accepted.viewerUrl ?? "");
     if (proposedLiveUrl) liveViewUrl = validateAgentEndpoint(proposedLiveUrl);
+    if (!liveViewUrl) {
+      await fetch(`${endpoint}/v1/search-tasks/${id}/cancel`, {
+        method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(5_000),
+      }).catch(() => undefined);
+      throw new Error("Agent 未返回实时同屏地址，任务已阻止执行");
+    }
     await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, progress, current_action, live_view_url, updated_at) VALUES (?, ?, ?, 'dispatched', ?, 5, ?, ?, ?)")
       .bind(id, args.task.id, args.source, now, `正在启动${args.source}浏览器`, liveViewUrl, now).run();
     return { id, status: "dispatched", liveViewUrl };

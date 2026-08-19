@@ -24,8 +24,8 @@ export async function POST(request: Request) {
   }
   const task = await db.prepare("SELECT * FROM tasks WHERE id = ?").bind(payload.taskId).first<TaskRecord>();
   if (!task) return Response.json({ error: "任务不存在" }, { status: 404 });
-  const job = await db.prepare("SELECT id FROM connector_jobs WHERE id = ? AND task_id = ? AND source = ?")
-    .bind(payload.jobId, payload.taskId, payload.source).first();
+  const job = await db.prepare("SELECT id, live_view_url FROM connector_jobs WHERE id = ? AND task_id = ? AND source = ?")
+    .bind(payload.jobId, payload.taskId, payload.source).first<{ id: string; live_view_url: string }>();
   if (!job) return Response.json({ error: "连接器任务不存在" }, { status: 404 });
   if (payload.event === "progress" || !Array.isArray(payload.items)) {
     const progress = Math.max(0, Math.min(100, Number(payload.progress ?? 0)));
@@ -37,6 +37,11 @@ export async function POST(request: Request) {
     } catch { return Response.json({ error: "实时画面地址必须是公网 HTTPS" }, { status: 400 }); }
     const status = ["dispatched", "running", "waiting_login", "failed"].includes(String(payload.status)) ? String(payload.status) : "running";
     const now = new Date().toISOString();
+    if (status === "running" && !liveViewUrl && !job.live_view_url) {
+      await db.prepare("UPDATE connector_jobs SET status='failed', error=?, current_action=?, updated_at=? WHERE id=?")
+        .bind("实时同屏未建立，已阻止 Agent 继续执行", "等待恢复电脑画面", now, payload.jobId).run();
+      return Response.json({ error: "实时同屏是强制要求，请先恢复 liveViewUrl" }, { status: 409 });
+    }
     await db.prepare(`UPDATE connector_jobs SET status=?, progress=?, current_action=?,
       live_view_url=CASE WHEN ?='' THEN live_view_url ELSE ? END,
       screenshot_url=CASE WHEN ?='' THEN screenshot_url ELSE ? END,
