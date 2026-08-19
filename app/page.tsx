@@ -87,6 +87,10 @@ type ConnectorSettingsState = {
   capabilities: string[];
 };
 
+type BrowserSessionState = {
+  platform: string; status: string; profileName: string; lastCheckedAt: string;
+};
+
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EETOP", "EDA365"];
 
@@ -386,7 +390,7 @@ function Overview({
   onCreate: () => void;
 }) {
   const activeTasks = data.tasks.filter((task) => task.status === "active").length;
-  const readySources = data.sources.filter((source) => ["可连接", "可执行", "已连接"].includes(source.status)).length;
+  const readySources = data.sources.filter((source) => ["可连接", "可执行", "已连接", "已登录"].includes(source.status)).length;
   const pendingLeads = data.leads.filter((lead) => lead.reviewStatus === "待审核").length;
   return (
     <>
@@ -414,7 +418,7 @@ function Overview({
         <div className="quickstart-head"><div><p className="eyebrow">GET STARTED</p><h3>第一次使用？按这三步完成一次检索</h3></div><span>预计 3 分钟</span></div>
         <div className="quickstart-steps">
           <button onClick={onCreate}><b>01</b><span><strong>导入 JD</strong><small>自动拆解技术栈、企业和求职信号</small></span><em>{activeTasks} 个任务</em></button>
-          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>确认数据源</strong><small>论坛可直接运行，社媒需连接电脑 Agent</small></span><em>{readySources}/6 可运行</em></button>
+          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>连接这台电脑</strong><small>Agent 复用浏览器里已经登录的平台账号</small></span><em>{readySources}/6 已就绪</em></button>
           <button onClick={() => onNavigate("leads")}><b>03</b><span><strong>审核线索</strong><small>查看原文证据，确认高价值候选人</small></span><em>{pendingLeads} 条待审核</em></button>
         </div>
       </section>
@@ -449,7 +453,7 @@ function Overview({
               <div className="source-mini" key={source.id}>
                 <span className="source-logo">{initials(source.name)}</span>
                 <span><b>{source.name}</b><small>{source.mode}</small></span>
-                <i className={`health-dot ${["可连接", "可执行", "已连接"].includes(source.status) ? "healthy" : source.status.includes("待") ? "warning" : "testing"}`} />
+                <i className={`health-dot ${["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "healthy" : source.status.includes("待") || source.status.includes("登录") ? "warning" : "testing"}`} />
               </div>
             ))}
           </div>
@@ -571,6 +575,10 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState("");
+  const [sessions, setSessions] = useState<BrowserSessionState[]>([]);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [openingPlatform, setOpeningPlatform] = useState("");
+  const [sessionMessage, setSessionMessage] = useState("");
 
   async function loadSettings() {
     const response = await fetch("/api/connectors/settings", { cache: "no-store" });
@@ -618,23 +626,55 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
       const result = await response.json() as { error?: string; message?: string };
       if (!response.ok) throw new Error(result.error ?? "连接失败");
       await loadSettings(); await onChanged(); setMessage(result.message ?? "连接成功");
+      await checkSessions();
     } catch (error) { await loadSettings(); await onChanged(); setMessage(error instanceof Error ? error.message : "连接失败"); }
     finally { setTesting(false); }
+  }
+
+  async function checkSessions() {
+    setSessionLoading(true); setSessionMessage("");
+    try {
+      const response = await fetch("/api/connectors/browser-sessions", { cache: "no-store" });
+      const result = await response.json() as { sessions?: BrowserSessionState[]; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "登录状态检测失败");
+      setSessions(result.sessions ?? []); setSessionMessage("已读取电脑浏览器的登录状态"); await onChanged();
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "登录状态检测失败"); }
+    finally { setSessionLoading(false); }
+  }
+
+  async function openPlatform(platform: string) {
+    setOpeningPlatform(platform); setSessionMessage("");
+    try {
+      const response = await fetch("/api/connectors/browser-sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
+      const result = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "无法打开平台");
+      setSessionMessage(result.message ?? `已通知电脑打开${platform}`);
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "无法打开平台"); }
+    finally { setOpeningPlatform(""); }
   }
 
   const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "已保存，待测试" : "未配置";
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">CONNECTION SETTINGS</p><h3>电脑 Agent 连接设置</h3><span>配置一次，后续检索任务会自动派发到你的电脑接管产品。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
+      <div className="settings-head"><div><p className="eyebrow">COMPUTER CONNECTION</p><h3>连接这台已登录平台的电脑</h3><span>账号和 Cookie 保留在电脑浏览器中；本系统不会保存抖音、小红书等平台密码。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
       <div className="settings-grid">
-        <label className="settings-field wide"><span>Agent 公网地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /><small>必须是公网 HTTPS；本机 Agent 可通过安全隧道暴露。测试会请求 GET /health。</small></label>
-        <label className="settings-field"><span>访问 Token</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "可选"} /><small>只写字段，保存后不会回显。</small></label>
-        <label className="settings-field"><span>回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "建议设置"} /><small>Agent 回写进度和结果时使用。</small></label>
+        <label className="settings-field wide"><span>电脑 Agent 地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /><small>这是电脑接管产品的连接地址，不是抖音或小红书网址。配置一次即可。</small></label>
+        <label className="settings-field"><span>Agent 访问令牌</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "可选"} /><small>用于网站与电脑 Agent 通信，不是平台账号密码。</small></label>
+        <label className="settings-field"><span>结果回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "建议设置"} /><small>用于安全回写任务进度和采集结果。</small></label>
       </div>
       <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
-      <div className="settings-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存配置"}</button><button className="primary-button" disabled={!endpoint || saving || testing} onClick={() => void testConnection()}>{testing ? "正在测试…" : "测试连接"}</button>{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">打开电脑实时画面 ↗</a>}</div>
+      <div className="settings-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存连接"}</button><button className="primary-button" disabled={!endpoint || saving || testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "检测这台电脑"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑画面 ↗</a>}</div>
       {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "Agent 在线" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近测试：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status === "connected" && !settings.liveViewUrl && <span>连接已成功，但 Agent 尚未在 /health 返回 liveViewUrl，暂时无法显示实时电脑画面。</span>}</div>}
-      <div className="contract-note"><b>AGENT CONTRACT</b><span>健康检查 GET /health · 接收任务 POST /v1/search-tasks · 进度与结果 POST 本系统 callback。Agent 返回 liveViewUrl 后即可观看真实浏览器操作。</span></div>
+      <div className="session-matrix">
+        <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
+        <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
+          const session = sessions.find((item) => item.platform === platform);
+          const label = session?.status === "logged_in" ? "已登录" : session?.status === "expired" ? "登录过期" : session?.status === "checking" ? "检测中" : sessions.length ? "未登录" : "尚未检测";
+          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={!endpoint || openingPlatform === platform} onClick={() => void openPlatform(platform)}>{openingPlatform === platform ? "正在打开…" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
+        })}</div>
+        {sessionMessage && <div className="session-message">{sessionMessage}</div>}
+      </div>
+      <div className="contract-note"><b>HOW IT WORKS</b><span>电脑先登录平台 → Agent 复用现有浏览器 Profile → 任务只负责打开网站、搜索和采集 → 会话过期时提示重新登录。</span></div>
     </section>
   );
 }
@@ -651,8 +691,8 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
     <section>
       <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过你现有的电脑 Agent 安全派发任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
       <div className="connector-readiness">
-        <div><span>COMPUTER AGENT</span><strong>{waitingJobs ? "等待接入" : "连接状态正常"}</strong><p>配置服务地址、回调密钥和平台登录账号后，抖音/微博/小红书/知乎任务会自动派发并回写结果。</p></div>
-        <div className="readiness-steps"><span className="done">01 · 数据协议</span><span className="done">02 · 安全回调</span><span className={waitingJobs ? "current" : "done"}>03 · Agent 地址</span><span>04 · 账号实测</span></div>
+        <div><span>LOCAL BROWSER AGENT</span><strong>{waitingJobs ? "等待连接电脑" : "电脑连接正常"}</strong><p>电脑浏览器提前登录平台，Agent 复用现有会话。网页端不接触平台密码，只派发打开、搜索、滚动与采集动作。</p></div>
+        <div className="readiness-steps"><span className="done">01 · 启动电脑 Agent</span><span className="done">02 · 浏览器预先登录</span><span className={waitingJobs ? "current" : "done"}>03 · 检测登录状态</span><span>04 · 运行检索任务</span></div>
       </div>
       <ConnectorSettingsPanel onChanged={onChanged} />
       <section className="live-console">
@@ -665,10 +705,10 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
       <div className="source-grid">
         {sources.map((source) => (
           <article className="source-card" key={source.id}>
-            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接"].includes(source.status) ? "connected" : source.status.includes("待") ? "login" : "testing"}`}>{source.status}</span></div>
+            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "connected" : source.status.includes("待") || source.status.includes("登录") ? "login" : "testing"}`}>{source.status}</span></div>
             <dl><div><dt>接入方式</dt><dd>{source.mode}</dd></div><div><dt>最近检查</dt><dd>{source.lastCheck}</dd></div></dl>
             <p>{source.note}</p>
-            <span className="source-action">{["可连接", "可执行", "已连接"].includes(source.status) ? "READY TO RUN" : "CONFIGURATION REQUIRED"}</span>
+            <span className="source-action">{["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "READY TO RUN" : "LOGIN REQUIRED"}</span>
           </article>
         ))}
       </div>
@@ -769,7 +809,7 @@ function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; on
           <p className="guide-intro">不用先研究所有菜单。创建一个任务、运行一次检索、审核一条线索，就能理解完整工作流。</p>
           <div className="guide-journey">
             <article><span>01</span><div><h3>粘贴客户 JD</h3><p>系统自动识别职位、技术栈、目标企业、求职信号和排除词，你只需检查结果。</p><button onClick={onCreate}>创建检索任务 →</button></div></article>
-            <article><span>02</span><div><h3>选择并运行数据源</h3><p>EETOP、EDA365 可直接验证；抖音等社媒会在电脑 Agent 接通后自动派发。</p><button onClick={() => onNavigate("sources")}>查看数据源状态 →</button></div></article>
+            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；Agent 会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("sources")}>检查电脑与登录状态 →</button></div></article>
             <article><span>03</span><div><h3>人工复核高价值线索</h3><p>优先看 A 级线索，核对公开原文、作者和来源链接，再标记确认或误报。</p><button onClick={() => onNavigate("leads")}>打开线索工作台 →</button></div></article>
           </div>
           <div className="guide-terms"><b>三个概念</b><span><strong>任务</strong>＝一套持续运行的检索条件</span><span><strong>线索</strong>＝经过过滤和分析的公开内容</span><span><strong>运行日志</strong>＝每次获取、过滤、去重的审计记录</span></div>

@@ -62,6 +62,7 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     jobId: id, taskId: args.task.id, platform: args.source, queries,
     excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
     fields: ["snippet", "author", "authorId", "publishedAt", "url"],
+    browser: { reuseExistingProfile: true, interactive: true, requireExistingLogin: true },
     callbackUrl: `${args.callbackBase}/api/connectors/computer-agent/callback`,
   };
   try {
