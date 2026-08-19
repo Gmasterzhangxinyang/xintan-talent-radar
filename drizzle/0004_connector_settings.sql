@@ -20,4 +20,4 @@ ALTER TABLE `connector_jobs` ADD `live_view_url` text DEFAULT '' NOT NULL;
 --> statement-breakpoint
 ALTER TABLE `connector_jobs` ADD `screenshot_url` text DEFAULT '' NOT NULL;
 --> statement-breakpoint
-ALTER TABLE `connector_jobs` ADD `updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL;
+ALTER TABLE `connector_jobs` ADD `updated_at` text DEFAULT '' NOT NULL;
