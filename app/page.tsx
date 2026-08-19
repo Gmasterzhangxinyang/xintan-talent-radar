@@ -561,81 +561,53 @@ function RunsView({ runs }: { runs: Run[] }) {
 }
 
 const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
-  endpoint: "", hasToken: false, hasCallbackSecret: false, enabledSources: ["抖音", "微博", "小红书", "知乎"],
+  endpoint: "http://127.0.0.1:8765", hasToken: false, hasCallbackSecret: false, enabledSources: ["抖音", "微博", "小红书", "知乎"],
   status: "not_configured", lastTestAt: null, lastError: "", liveViewUrl: "", capabilities: [],
 };
+const LOCAL_ASSISTANT_URL = "http://127.0.0.1:8765";
 
 function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> }) {
   const [settings, setSettings] = useState(EMPTY_CONNECTOR_SETTINGS);
-  const [endpoint, setEndpoint] = useState("");
-  const [token, setToken] = useState("");
-  const [callbackSecret, setCallbackSecret] = useState("");
-  const [enabledSources, setEnabledSources] = useState<string[]>(EMPTY_CONNECTOR_SETTINGS.enabledSources);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
+  const [testing, setTesting] = useState(true);
   const [message, setMessage] = useState("");
   const [sessions, setSessions] = useState<BrowserSessionState[]>([]);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [openingPlatform, setOpeningPlatform] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
-
-  async function loadSettings() {
-    const response = await fetch("/api/connectors/settings", { cache: "no-store" });
-    const result = await response.json() as ConnectorSettingsState & { error?: string };
-    if (!response.ok) throw new Error(result.error ?? "连接设置读取失败");
-    setSettings(result);
-    setEndpoint(result.endpoint);
-    setEnabledSources(result.enabledSources);
-  }
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/connectors/settings", { cache: "no-store" }).then(async (response) => {
-      const result = await response.json() as ConnectorSettingsState & { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "连接设置读取失败");
+    fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) throw new Error("本地助手尚未启动");
+      const result = await response.json() as { liveViewUrl?: string; capabilities?: string[] };
       if (!cancelled) {
-        setSettings(result); setEndpoint(result.endpoint); setEnabledSources(result.enabledSources); setLoading(false);
+        const liveViewUrl = result.liveViewUrl ? new URL(result.liveViewUrl, LOCAL_ASSISTANT_URL).toString() : "";
+        setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
+        setMessage("已自动连接当前电脑");
       }
-    }).catch((error) => { if (!cancelled) { setMessage(error instanceof Error ? error.message : "连接设置读取失败"); setLoading(false); } });
+    }).catch(() => { if (!cancelled) setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); })
+      .finally(() => { if (!cancelled) setTesting(false); });
     return () => { cancelled = true; };
   }, []);
 
-  async function saveSettings(showMessage = true) {
-    setSaving(true); setMessage("");
-    try {
-      const response = await fetch("/api/connectors/settings", {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ endpoint, token, callbackSecret, enabledSources }),
-      });
-      const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "保存失败");
-      setToken(""); setCallbackSecret("");
-      await loadSettings(); await onChanged();
-      if (showMessage) setMessage("配置已安全保存，请执行连通性测试");
-      return true;
-    } catch (error) { setMessage(error instanceof Error ? error.message : "保存失败"); return false; }
-    finally { setSaving(false); }
-  }
-
   async function testConnection() {
-    if (!(await saveSettings(false))) return;
-    setTesting(true); setMessage("正在连接电脑助手…");
+    setTesting(true); setMessage("正在自动检测当前电脑…");
     try {
-      const response = await fetch("/api/connectors/settings", { method: "POST" });
-      const result = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(result.error ?? "连接失败");
-      await loadSettings(); await onChanged(); setMessage(result.message ?? "连接成功");
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" });
+      if (!response.ok) throw new Error("本地助手尚未启动");
+      const result = await response.json() as { liveViewUrl?: string; capabilities?: string[] };
+      const liveViewUrl = result.liveViewUrl ? new URL(result.liveViewUrl, LOCAL_ASSISTANT_URL).toString() : "";
+      setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
+      setMessage("已自动连接当前电脑"); await onChanged();
       await checkSessions();
-    } catch (error) { await loadSettings(); await onChanged(); setMessage(error instanceof Error ? error.message : "连接失败"); }
+    } catch { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); setMessage("请先启动芯探电脑助手，网页会自动连接，无需任何配置"); }
     finally { setTesting(false); }
   }
 
   async function checkSessions() {
     setSessionLoading(true); setSessionMessage("");
     try {
-      const response = await fetch("/api/connectors/browser-sessions", { cache: "no-store" });
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" });
       const result = await response.json() as { sessions?: BrowserSessionState[]; error?: string };
       if (!response.ok) throw new Error(result.error ?? "登录状态检测失败");
       setSessions(result.sessions ?? []); setSessionMessage("已读取电脑浏览器的登录状态"); await onChanged();
@@ -646,7 +618,7 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
   async function openPlatform(platform: string) {
     setOpeningPlatform(platform); setSessionMessage("");
     try {
-      const response = await fetch("/api/connectors/browser-sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(result.error ?? "无法打开平台");
       setSessionMessage(result.message ?? `已通知电脑打开${platform}`);
@@ -657,30 +629,20 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
   const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "等待检测" : "待连接";
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">COMPUTER ASSISTANT</p><h3>连接电脑助手</h3><span>先打开电脑上的 AI 接管软件，再连接并检查平台登录状态。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
+      <div className="settings-head"><div><p className="eyebrow">LOCAL COMPUTER</p><h3>当前电脑</h3><span>固定连接本机，网页会自动检测，不需要填写任何地址或密钥。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
-        <div className="pair-copy"><b>{settings.status === "connected" ? "这台电脑已连接" : "等待连接电脑助手"}</b><p>{settings.status === "connected" ? "实时同屏已建立，可以检查抖音、小红书等平台的登录状态。" : "平台账号和 Cookie 只保留在你的电脑浏览器中，不会上传到本系统。"}</p></div>
-        <div className="pair-actions"><button className="primary-button" disabled={saving || testing || loading} onClick={() => endpoint ? void testConnection() : setShowAdvanced(true)}>{testing ? "正在连接…" : settings.status === "connected" ? "重新检测" : endpoint ? "连接这台电脑" : "首次配对"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}</div>
+        <div className="pair-copy"><b>{settings.status === "connected" ? "本机已自动连接" : "未检测到本地助手"}</b><p>{settings.status === "connected" ? "可以检查抖音、小红书等平台的登录状态。" : "请先启动芯探电脑助手；启动后网页会自动识别，不需要配置。"}</p></div>
+        <div className="pair-actions"><button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : settings.status === "connected" ? "重新检测" : "检测本机"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}</div>
       </div>
       {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "电脑助手在线，实时同屏已建立" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近检测：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status !== "connected" && <span>连接成功后才会执行社媒任务。</span>}</div>}
-      <div className="connection-shortcuts">{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑实时画面 ↗</a>}<button onClick={() => setShowAdvanced((current) => !current)}>{showAdvanced ? "收起高级设置" : "管理员高级设置"}</button></div>
-      {showAdvanced && <div className="advanced-settings">
-        <div className="advanced-head"><b>管理员高级设置</b><span>仅安装和维护电脑助手时使用，普通用户无需修改。</span></div>
-        <div className="settings-grid">
-          <label className="settings-field wide"><span>电脑助手服务地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://agent.example.com" disabled={loading} /></label>
-          <label className="settings-field"><span>访问令牌</span><input type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={settings.hasToken ? "已保存（留空不修改）" : "由管理员填写"} /></label>
-          <label className="settings-field"><span>结果回调密钥</span><input type="password" autoComplete="new-password" value={callbackSecret} onChange={(event) => setCallbackSecret(event.target.value)} placeholder={settings.hasCallbackSecret ? "已保存（留空不修改）" : "由管理员填写"} /></label>
-        </div>
-        <div className="platform-switches"><b>启用平台</b>{["抖音", "微博", "小红书", "知乎"].map((source) => <label key={source}><input type="checkbox" checked={enabledSources.includes(source)} onChange={() => setEnabledSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div>
-        <div className="advanced-actions"><button className="ghost-button" disabled={saving || testing} onClick={() => void saveSettings()}>{saving ? "正在保存…" : "保存高级设置"}</button></div>
-      </div>}
+      {settings.liveViewUrl && <div className="connection-shortcuts"><a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑实时画面 ↗</a></div>}
       <div className="session-matrix">
         <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
         <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
           const session = sessions.find((item) => item.platform === platform);
           const label = session?.status === "logged_in" ? "已登录" : session?.status === "expired" ? "登录过期" : session?.status === "checking" ? "检测中" : sessions.length ? "未登录" : "尚未检测";
-          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={!endpoint || openingPlatform === platform} onClick={() => void openPlatform(platform)}>{openingPlatform === platform ? "正在打开…" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
+          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={settings.status !== "connected" || openingPlatform === platform} onClick={() => void openPlatform(platform)}>{openingPlatform === platform ? "正在打开…" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
         })}</div>
         {sessionMessage && <div className="session-message">{sessionMessage}</div>}
       </div>
