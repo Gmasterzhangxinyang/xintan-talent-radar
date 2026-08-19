@@ -566,7 +566,7 @@ const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
 };
 const LOCAL_ASSISTANT_URL = "http://127.0.0.1:8765";
 
-function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> }) {
+function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: () => Promise<void>; onConnectionChange: (connected: boolean) => void }) {
   const [settings, setSettings] = useState(EMPTY_CONNECTOR_SETTINGS);
   const [testing, setTesting] = useState(true);
   const [message, setMessage] = useState("");
@@ -584,11 +584,12 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
         const liveViewUrl = result.liveViewUrl ? new URL(result.liveViewUrl, LOCAL_ASSISTANT_URL).toString() : "";
         setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
         setMessage("已自动连接当前电脑");
+        onConnectionChange(true);
       }
-    }).catch(() => { if (!cancelled) setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); })
+    }).catch(() => { if (!cancelled) { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); onConnectionChange(false); } })
       .finally(() => { if (!cancelled) setTesting(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [onConnectionChange]);
 
   async function testConnection() {
     setTesting(true); setMessage("正在自动检测当前电脑…");
@@ -598,9 +599,9 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
       const result = await response.json() as { liveViewUrl?: string; capabilities?: string[] };
       const liveViewUrl = result.liveViewUrl ? new URL(result.liveViewUrl, LOCAL_ASSISTANT_URL).toString() : "";
       setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
-      setMessage("已自动连接当前电脑"); await onChanged();
+      setMessage("已自动连接当前电脑"); onConnectionChange(true); await onChanged();
       await checkSessions();
-    } catch { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); setMessage("请先启动芯探电脑助手，网页会自动连接，无需任何配置"); }
+    } catch { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); onConnectionChange(false); setMessage("请先启动芯探电脑助手，网页会自动连接，无需任何配置"); }
     finally { setTesting(false); }
   }
 
@@ -621,8 +622,21 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
       const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(result.error ?? "无法打开平台");
-      setSessionMessage(result.message ?? `已通知电脑打开${platform}`);
+      setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "browser_open", lastCheckedAt: new Date().toISOString() } : item));
+      setSessionMessage(`${result.message ?? `已通知电脑打开${platform}`}；登录完成后请返回点击“确认已登录”`);
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "无法打开平台"); }
+    finally { setOpeningPlatform(""); }
+  }
+
+  async function confirmPlatform(platform: string) {
+    setOpeningPlatform(platform); setSessionMessage("");
+    try {
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
+      const result = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "确认失败");
+      setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "logged_in", lastCheckedAt: new Date().toISOString() } : item));
+      setSessionMessage(result.message ?? `${platform}已确认登录`);
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "确认失败"); }
     finally { setOpeningPlatform(""); }
   }
 
@@ -641,8 +655,9 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
         <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
         <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
           const session = sessions.find((item) => item.platform === platform);
-          const label = session?.status === "logged_in" ? "已登录" : session?.status === "expired" ? "登录过期" : session?.status === "checking" ? "检测中" : sessions.length ? "未登录" : "尚未检测";
-          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={settings.status !== "connected" || openingPlatform === platform} onClick={() => void openPlatform(platform)}>{openingPlatform === platform ? "正在打开…" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
+          const label = session?.status === "logged_in" ? "已登录" : session?.status === "browser_open" ? "待确认" : session?.status === "expired" ? "登录过期" : session?.status === "checking" ? "检测中" : sessions.length ? "未确认" : "尚未检测";
+          const waitingConfirmation = session?.status === "browser_open";
+          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={settings.status !== "connected" || openingPlatform === platform} onClick={() => void (waitingConfirmation ? confirmPlatform(platform) : openPlatform(platform))}>{openingPlatform === platform ? "处理中…" : waitingConfirmation ? "确认已登录" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
         })}</div>
         {sessionMessage && <div className="session-message">{sessionMessage}</div>}
       </div>
@@ -652,9 +667,10 @@ function ConnectorSettingsPanel({ onChanged }: { onChanged: () => Promise<void> 
 }
 
 function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]>; onChanged: () => Promise<void> }) {
+  const [localConnected, setLocalConnected] = useState(false);
   const latestJobs = jobs.filter((job, index) => jobs.findIndex((candidate) => candidate.taskId === job.taskId && candidate.source === job.source) === index);
   const completedJobs = latestJobs.filter((job) => job.status === "completed").length;
-  const waitingJobs = latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
+  const waitingJobs = localConnected ? 0 : latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status));
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [heartbeatClock, setHeartbeatClock] = useState(0);
@@ -671,7 +687,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
         <div><span>LOCAL COMPUTER ASSISTANT</span><strong>{waitingJobs ? "电脑助手尚未连接" : "电脑连接正常"}</strong><p>{waitingJobs ? "当前任务没有派发，也没有操作你的电脑。请先启动本地电脑助手。" : "电脑浏览器提前登录平台，助手复用现有会话；网页端不接触平台密码。"}</p></div>
         <div className="readiness-steps"><span className={waitingJobs ? "current" : "done"}>01 · 启动电脑助手</span><span className={waitingJobs ? "" : "done"}>02 · 浏览器预先登录</span><span className={waitingJobs ? "" : "done"}>03 · 检查登录状态</span><span>04 · 运行检索任务</span></div>
       </div>
-      <ConnectorSettingsPanel onChanged={onChanged} />
+      <ConnectorSettingsPanel onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
         {liveJob ? <div className="live-console-body">
@@ -680,14 +696,16 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
         </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "任务没有派发，也没有操作你的电脑。启动并连接本地助手后才能运行。" : "运行包含社媒平台的任务后，电脑画面会显示在这里。"}</span></div>}
       </section>
       <div className="source-grid">
-        {sources.map((source) => (
-          <article className="source-card" key={source.id}>
-            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "connected" : source.status.includes("待") || source.status.includes("登录") ? "login" : "testing"}`}>{source.status}</span></div>
-            <dl><div><dt>接入方式</dt><dd>{source.mode}</dd></div><div><dt>最近检查</dt><dd>{source.lastCheck}</dd></div></dl>
-            <p>{source.note}</p>
-            <span className="source-action">{["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "READY TO RUN" : "LOGIN REQUIRED"}</span>
-          </article>
-        ))}
+        {sources.map((source) => {
+          const isLocalSocial = localConnected && ["抖音", "微博", "小红书", "知乎"].includes(source.name);
+          const sourceStatus = isLocalSocial ? "已连接" : source.status;
+          return <article className="source-card" key={source.id}>
+            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接", "已登录"].includes(sourceStatus) ? "connected" : sourceStatus.includes("待") || sourceStatus.includes("登录") ? "login" : "testing"}`}>{sourceStatus}</span></div>
+            <dl><div><dt>接入方式</dt><dd>{isLocalSocial ? "本机电脑助手" : source.mode}</dd></div><div><dt>最近检查</dt><dd>{isLocalSocial ? "刚刚" : source.lastCheck}</dd></div></dl>
+            <p>{isLocalSocial ? "本机助手已连接，具体账号状态以上方登录检测结果为准" : source.note}</p>
+            <span className="source-action">{["可连接", "可执行", "已连接", "已登录"].includes(sourceStatus) ? "READY TO RUN" : "LOGIN REQUIRED"}</span>
+          </article>;
+        })}
       </div>
       <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始六条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>

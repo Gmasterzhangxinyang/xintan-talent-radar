@@ -1,6 +1,9 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { readFile, unlink } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
 const HOST = "127.0.0.1";
 const PORT = 8765;
@@ -15,6 +18,15 @@ const PLATFORM_URLS = {
   "小红书": "https://www.xiaohongshu.com/explore",
   "知乎": "https://www.zhihu.com/",
 };
+const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
+mkdirSync(resolve(PROJECT_DIR, "work"), { recursive: true });
+let sessionStates = Object.fromEntries(Object.keys(PLATFORM_URLS).map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
+try { sessionStates = { ...sessionStates, ...JSON.parse(readFileSync(SESSION_FILE, "utf8")) }; } catch { /* first launch */ }
+
+function saveSessions() {
+  writeFileSync(SESSION_FILE, JSON.stringify(sessionStates, null, 2));
+}
 
 function allowBrowser(request, response) {
   const origin = request.headers.origin;
@@ -69,7 +81,7 @@ const server = http.createServer(async (request, response) => {
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/browser-sessions") {
-    return json(response, 200, { sessions: Object.keys(PLATFORM_URLS).map((platform) => ({ platform, status: "unknown", profileName: "本机默认浏览器", lastCheckedAt: new Date().toISOString() })) });
+    return json(response, 200, { sessions: Object.keys(PLATFORM_URLS).map((platform) => ({ platform, ...sessionStates[platform], profileName: "本机默认浏览器" })) });
   }
   if (request.method === "POST" && url.pathname === "/v1/browser-sessions/open") {
     try {
@@ -78,12 +90,25 @@ const server = http.createServer(async (request, response) => {
       if (!target) return json(response, 400, { error: "暂不支持该平台" });
       execFile("/usr/bin/open", [target], (error) => {
         if (error) return json(response, 500, { error: "无法打开浏览器" });
+        sessionStates[String(platform)] = { status: "browser_open", lastCheckedAt: new Date().toISOString() };
+        saveSessions();
         json(response, 200, { ok: true, message: `已在本机浏览器打开${platform}` });
       });
     } catch {
       return json(response, 400, { error: "请求格式不正确" });
     }
     return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/browser-sessions/confirm") {
+    try {
+      const { platform } = await readJson(request);
+      if (!PLATFORM_URLS[String(platform)]) return json(response, 400, { error: "暂不支持该平台" });
+      sessionStates[String(platform)] = { status: "logged_in", lastCheckedAt: new Date().toISOString() };
+      saveSessions();
+      return json(response, 200, { ok: true, message: `${platform}已确认登录` });
+    } catch {
+      return json(response, 400, { error: "请求格式不正确" });
+    }
   }
   if (request.method === "GET" && url.pathname === "/screen.jpg") return captureScreen(response);
   if (request.method === "GET" && url.pathname === "/live") {
