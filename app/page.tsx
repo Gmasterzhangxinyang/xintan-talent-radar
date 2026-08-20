@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type View = "overview" | "tasks" | "leads" | "runs" | "sources";
 
@@ -91,8 +91,13 @@ type BrowserSessionState = {
   platform: string; status: string; profileName: string; lastCheckedAt: string;
 };
 
+type SourceConnectivity = {
+  name: string; reachable: boolean; status: string; httpStatus: number; checkedAt: string; detail: string;
+};
+
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EETOP", "EDA365"];
+const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
   { id: "overview", label: "情报概览", icon: "OV" },
@@ -390,40 +395,22 @@ function Overview({
   onCreate: () => void;
 }) {
   const activeTasks = data.tasks.filter((task) => task.status === "active").length;
-  const readySources = data.sources.filter((source) => ["可连接", "可执行", "已连接", "已登录"].includes(source.status)).length;
   const pendingLeads = data.leads.filter((lead) => lead.reviewStatus === "待审核").length;
   return (
     <>
-      <section className="hero-panel">
-        <div className="hero-copy">
-          <div className="live-label"><span />INTELLIGENCE ENGINE · ONLINE</div>
-          <h2>把开放网络信号，<br /><em>变成招聘判断。</em></h2>
-          <p>把 JD 变成持续运行的跨平台检索任务。自动过滤噪声、识别人才流动与企业异动，并为每一条判断保留可追溯证据。</p>
-          <div className="hero-actions">
-            <button className="light-button" onClick={onCreate}>从 JD 创建任务 →</button>
-            <button className="text-button light" onClick={() => onNavigate("leads")}>查看示例线索</button>
-          </div>
+      <section className="overview-hero">
+        <div className="overview-copy">
+          <p className="eyebrow">TALENT INTELLIGENCE</p>
+          <h2>Talent signals,<br /><em>clearly ranked.</em></h2>
+          <p>从 JD 出发，持续发现人才流动、团队扩张与项目变化。每条线索都保留来源和判断依据。</p>
+          <div className="hero-actions"><button className="primary-button" onClick={onCreate}>从 JD 创建任务</button><button className="ghost-button" onClick={() => onNavigate("leads")}>查看线索</button></div>
         </div>
-        <div className="hero-visual" aria-label="今日新增线索统计">
-          <div className="hero-terminal">
-            <div className="terminal-head"><span>LIVE SIGNAL INDEX</span><i>● ONLINE</i></div>
-            <div className="terminal-score"><strong>{data.leads.length}</strong><span>ACTIVE SIGNALS</span><em>+{data.leads.filter((lead) => lead.priority === "A").length} HIGH PRIORITY</em></div>
-            <div className="terminal-bars">{[34, 58, 43, 72, 49, 86, 64, 92, 76, 100].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-            <div className="terminal-feed"><span><i />人才流动信号 <b>91</b></span><span><i />团队扩张信号 <b>86</b></span><span><i />项目变动信号 <b>76</b></span></div>
-          </div>
+        <div className="overview-status">
+          <button onClick={() => onNavigate("tasks")}><span>Active tasks</span><strong>{activeTasks}</strong><small>持续运行的检索任务</small></button>
+          <button onClick={() => onNavigate("sources")}><span>Sources</span><strong>{data.sources.length}</strong><small>已配置，实时状态在连接页</small></button>
+          <button onClick={() => onNavigate("leads")}><span>Review queue</span><strong>{pendingLeads}</strong><small>等待人工确认的线索</small></button>
         </div>
       </section>
-
-      <section className="quickstart-panel">
-        <div className="quickstart-head"><div><p className="eyebrow">GET STARTED</p><h3>第一次使用？按这三步完成一次检索</h3></div><span>预计 3 分钟</span></div>
-        <div className="quickstart-steps">
-          <button onClick={onCreate}><b>01</b><span><strong>导入 JD</strong><small>自动拆解技术栈、企业和求职信号</small></span><em>{activeTasks} 个任务</em></button>
-          <button onClick={() => onNavigate("sources")}><b>02</b><span><strong>连接这台电脑</strong><small>电脑助手复用浏览器里已经登录的平台账号</small></span><em>{readySources}/6 已就绪</em></button>
-          <button onClick={() => onNavigate("leads")}><b>03</b><span><strong>审核线索</strong><small>查看原文证据，确认高价值候选人</small></span><em>{pendingLeads} 条待审核</em></button>
-        </div>
-      </section>
-
-      <div className="demo-banner"><span>DEMO DATA</span><p>当前首页包含 6 条示例线索，帮助理解产品流程；新任务产生的结果与运行数量均来自真实连接器。</p></div>
 
       <section className="metric-grid">
         <Metric label="累计分析内容" value={totals.fetched.toLocaleString()} delta="跨6个来源" tone="ink" />
@@ -447,13 +434,13 @@ function Overview({
         </div>
 
         <div className="panel source-panel">
-          <div className="panel-head"><div><p className="eyebrow">SOURCE HEALTH</p><h3>数据源脉搏</h3></div><button className="text-button" onClick={() => onNavigate("sources")}>管理来源 →</button></div>
+          <div className="panel-head"><div><p className="eyebrow">SOURCE COVERAGE</p><h3>覆盖来源</h3></div><button className="text-button" onClick={() => onNavigate("sources")}>检测连接 →</button></div>
           <div className="source-mini-grid">
             {data.sources.map((source) => (
               <div className="source-mini" key={source.id}>
                 <span className="source-logo">{initials(source.name)}</span>
-                <span><b>{source.name}</b><small>{source.mode}</small></span>
-                <i className={`health-dot ${["可连接", "可执行", "已连接", "已登录"].includes(source.status) ? "healthy" : source.status.includes("待") || source.status.includes("登录") ? "warning" : "testing"}`} />
+                <span><b>{source.name}</b><small>{SOCIAL_SOURCES.includes(source.name) ? "Local browser" : "Public forum"}</small></span>
+                <i className="health-dot testing" />
               </div>
             ))}
           </div>
@@ -566,14 +553,33 @@ const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
 };
 const LOCAL_ASSISTANT_URL = "http://127.0.0.1:8765";
 
-function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: () => Promise<void>; onConnectionChange: (connected: boolean) => void }) {
+function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { sources: Source[]; onChanged: () => Promise<void>; onConnectionChange: (connected: boolean) => void }) {
   const [settings, setSettings] = useState(EMPTY_CONNECTOR_SETTINGS);
   const [testing, setTesting] = useState(true);
   const [message, setMessage] = useState("");
   const [sessions, setSessions] = useState<BrowserSessionState[]>([]);
-  const [sessionLoading, setSessionLoading] = useState(false);
   const [openingPlatform, setOpeningPlatform] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
+  const [connectivity, setConnectivity] = useState<SourceConnectivity[]>([]);
+  const [checkingSources, setCheckingSources] = useState(false);
+
+  const refreshSources = useCallback(async () => {
+    setCheckingSources(true); setSessionMessage("");
+    try {
+      const [connectivityResponse, sessionResponse] = await Promise.all([
+        fetch(`${LOCAL_ASSISTANT_URL}/v1/connectivity`, { cache: "no-store" }),
+        fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" }),
+      ]);
+      const connectivityResult = await connectivityResponse.json() as { sources?: SourceConnectivity[]; error?: string };
+      const sessionResult = await sessionResponse.json() as { sessions?: BrowserSessionState[]; error?: string };
+      if (!connectivityResponse.ok) throw new Error(connectivityResult.error ?? "数据源检测失败");
+      if (!sessionResponse.ok) throw new Error(sessionResult.error ?? "登录状态检测失败");
+      setConnectivity(connectivityResult.sources ?? []);
+      setSessions(sessionResult.sessions ?? []);
+      setSessionMessage("六个数据源已完成检测");
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "数据源检测失败"); }
+    finally { setCheckingSources(false); }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -585,11 +591,12 @@ function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: 
         setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
         setMessage("已自动连接当前电脑");
         onConnectionChange(true);
+        void refreshSources();
       }
     }).catch(() => { if (!cancelled) { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); onConnectionChange(false); } })
       .finally(() => { if (!cancelled) setTesting(false); });
     return () => { cancelled = true; };
-  }, [onConnectionChange]);
+  }, [onConnectionChange, refreshSources]);
 
   async function testConnection() {
     setTesting(true); setMessage("正在自动检测当前电脑…");
@@ -600,20 +607,9 @@ function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: 
       const liveViewUrl = result.liveViewUrl ? new URL(result.liveViewUrl, LOCAL_ASSISTANT_URL).toString() : "";
       setSettings({ ...EMPTY_CONNECTOR_SETTINGS, status: "connected", lastTestAt: new Date().toISOString(), liveViewUrl, capabilities: result.capabilities ?? [] });
       setMessage("已自动连接当前电脑"); onConnectionChange(true); await onChanged();
-      await checkSessions();
+      await refreshSources();
     } catch { setSettings({ ...EMPTY_CONNECTOR_SETTINGS, lastError: "未检测到本地电脑助手" }); onConnectionChange(false); setMessage("请先启动芯探电脑助手，网页会自动连接，无需任何配置"); }
     finally { setTesting(false); }
-  }
-
-  async function checkSessions() {
-    setSessionLoading(true); setSessionMessage("");
-    try {
-      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" });
-      const result = await response.json() as { sessions?: BrowserSessionState[]; error?: string };
-      if (!response.ok) throw new Error(result.error ?? "登录状态检测失败");
-      setSessions(result.sessions ?? []); setSessionMessage("已读取电脑浏览器的登录状态"); await onChanged();
-    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "登录状态检测失败"); }
-    finally { setSessionLoading(false); }
   }
 
   async function openPlatform(platform: string) {
@@ -622,8 +618,12 @@ function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: 
       const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }) });
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(result.error ?? "无法打开平台");
-      setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "browser_open", lastCheckedAt: new Date().toISOString() } : item));
-      setSessionMessage(`${result.message ?? `已通知电脑打开${platform}`}；登录完成后请返回点击“确认已登录”`);
+      if (SOCIAL_SOURCES.includes(platform)) {
+        setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "browser_open", lastCheckedAt: new Date().toISOString() } : item));
+        setSessionMessage(`${result.message ?? `已通知电脑打开${platform}`}；登录完成后请返回点击“确认已登录”`);
+      } else {
+        setSessionMessage(result.message ?? `已在浏览器打开${platform}`);
+      }
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "无法打开平台"); }
     finally { setOpeningPlatform(""); }
   }
@@ -641,27 +641,33 @@ function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: 
   }
 
   const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "等待检测" : "待连接";
+  const reachableCount = connectivity.filter((item) => item.reachable).length;
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">LOCAL COMPUTER</p><h3>当前电脑</h3><span>固定连接本机，网页会自动检测，不需要填写任何地址或密钥。</span></div><span className={`settings-status ${settings.status}`}>{statusLabel}</span></div>
+      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>本机助手自动连接，不需要配置地址或密钥。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
-        <div className="pair-copy"><b>{settings.status === "connected" ? "本机已自动连接" : "未检测到本地助手"}</b><p>{settings.status === "connected" ? "可以检查抖音、小红书等平台的登录状态。" : "请先启动芯探电脑助手；启动后网页会自动识别，不需要配置。"}</p></div>
-        <div className="pair-actions"><button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : settings.status === "connected" ? "重新检测" : "检测本机"}</button>{settings.status === "connected" && <button className="ghost-button" disabled={sessionLoading} onClick={() => void checkSessions()}>{sessionLoading ? "正在检查…" : "检查登录状态"}</button>}</div>
+        <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/6 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
+        <div className="pair-actions">{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="ghost-button live-view-button">查看实时画面</a>}<button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "重新连接"}</button></div>
       </div>
-      {(message || settings.lastError || settings.lastTestAt) && <div className={`connection-result ${settings.status === "failed" ? "failed" : ""}`}><strong>{message || (settings.status === "connected" ? "电脑助手在线，实时同屏已建立" : settings.lastError)}</strong>{settings.lastTestAt && <span>最近检测：{new Date(settings.lastTestAt).toLocaleString("zh-CN", { hour12: false })}</span>}{settings.status !== "connected" && <span>连接成功后才会执行社媒任务。</span>}</div>}
-      {settings.liveViewUrl && <div className="connection-shortcuts"><a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">查看电脑实时画面 ↗</a></div>}
-      <div className="session-matrix">
-        <div className="session-matrix-head"><div><b>浏览器登录状态</b><span>请先在电脑浏览器中正常登录，任务执行时会复用同一浏览器配置。</span></div><small>密码与 Cookie 不上传</small></div>
-        <div className="session-grid">{["抖音", "微博", "小红书", "知乎"].map((platform) => {
-          const session = sessions.find((item) => item.platform === platform);
-          const label = session?.status === "logged_in" ? "已登录" : session?.status === "browser_open" ? "待确认" : session?.status === "expired" ? "登录过期" : session?.status === "checking" ? "检测中" : sessions.length ? "未确认" : "尚未检测";
+      <div className="source-center-head"><div><b>6 Sources</b><span>网络连通与账号状态</span></div><small>账号数据仅保留在本机</small></div>
+      <div className="source-connection-grid">
+        {sources.map((source) => {
+          const check = connectivity.find((item) => item.name === source.name);
+          const isSocial = SOCIAL_SOURCES.includes(source.name);
+          const session = sessions.find((item) => item.platform === source.name);
           const waitingConfirmation = session?.status === "browser_open";
-          return <div className="session-row" key={platform}><span className="source-logo">{initials(platform)}</span><div><b>{platform}</b><small>{session?.profileName || "本机默认浏览器配置"}</small></div><em className={session?.status === "logged_in" ? "ready" : session?.status === "expired" ? "expired" : "unknown"}>{label}</em><button disabled={settings.status !== "connected" || openingPlatform === platform} onClick={() => void (waitingConfirmation ? confirmPlatform(platform) : openPlatform(platform))}>{openingPlatform === platform ? "处理中…" : waitingConfirmation ? "确认已登录" : session?.status === "logged_in" ? "打开平台" : "打开并登录"}</button></div>;
-        })}</div>
-        {sessionMessage && <div className="session-message">{sessionMessage}</div>}
+          const label = !check ? (checkingSources ? "检测中" : "待检测") : !check.reachable ? "连接失败" : isSocial && session?.status === "logged_in" ? "已登录" : waitingConfirmation ? "待确认" : isSocial ? "可访问" : check.status === "restricted" ? "浏览器可达" : "已连通";
+          const tone = label === "已登录" || label === "已连通" || label === "浏览器可达" ? "ready" : label === "连接失败" ? "failed" : "pending";
+          return <article className="source-connection" key={source.id}>
+            <span className="source-logo large">{initials(source.name)}</span>
+            <div className="source-connection-copy"><b>{source.name}</b><span>{check?.detail ?? source.coverage}</span></div>
+            <em className={tone}>{label}</em>
+            <button disabled={settings.status !== "connected" || openingPlatform === source.name} onClick={() => void (isSocial && waitingConfirmation ? confirmPlatform(source.name) : openPlatform(source.name))}>{openingPlatform === source.name ? "处理中…" : isSocial && waitingConfirmation ? "确认登录" : isSocial && session?.status !== "logged_in" ? "登录" : "打开"}</button>
+          </article>;
+        })}
       </div>
-      <div className="contract-note"><b>HOW IT WORKS</b><span>电脑先登录平台 → 助手复用现有浏览器会话 → 自动打开网站、搜索和采集 → 登录过期时提醒你重新登录。</span></div>
+      {(sessionMessage || message || settings.lastError) && <div className="session-message">{sessionMessage || message || settings.lastError}</div>}
     </section>
   );
 }
@@ -669,7 +675,6 @@ function ConnectorSettingsPanel({ onChanged, onConnectionChange }: { onChanged: 
 function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]>; onChanged: () => Promise<void> }) {
   const [localConnected, setLocalConnected] = useState(false);
   const latestJobs = jobs.filter((job, index) => jobs.findIndex((candidate) => candidate.taskId === job.taskId && candidate.source === job.source) === index);
-  const completedJobs = latestJobs.filter((job) => job.status === "completed").length;
   const waitingJobs = localConnected ? 0 : latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status));
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -682,12 +687,8 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }, [onChanged]);
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">CONNECTOR MATRIX</p><h2>六个平台，一套统一连接器</h2><p>公开论坛直接采集；社媒平台通过本地电脑助手执行任务。</p></div><span className="audit-chip">{completedJobs} COMPLETED · {waitingJobs} WAITING</span></div>
-      <div className="connector-readiness">
-        <div><span>LOCAL COMPUTER ASSISTANT</span><strong>{waitingJobs ? "电脑助手尚未连接" : "电脑连接正常"}</strong><p>{waitingJobs ? "当前任务没有派发，也没有操作你的电脑。请先启动本地电脑助手。" : "电脑浏览器提前登录平台，助手复用现有会话；网页端不接触平台密码。"}</p></div>
-        <div className="readiness-steps"><span className={waitingJobs ? "current" : "done"}>01 · 启动电脑助手</span><span className={waitingJobs ? "" : "done"}>02 · 浏览器预先登录</span><span className={waitingJobs ? "" : "done"}>03 · 检查登录状态</span><span>04 · 运行检索任务</span></div>
-      </div>
-      <ConnectorSettingsPanel onChanged={onChanged} onConnectionChange={setLocalConnected} />
+      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>一次检测六个来源；需要登录的平台直接在本机浏览器完成。</p></div></div>
+      <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
         {liveJob ? <div className="live-console-body">
@@ -695,18 +696,6 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
           <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
         </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "任务没有派发，也没有操作你的电脑。启动并连接本地助手后才能运行。" : "运行包含社媒平台的任务后，电脑画面会显示在这里。"}</span></div>}
       </section>
-      <div className="source-grid">
-        {sources.map((source) => {
-          const isLocalSocial = localConnected && ["抖音", "微博", "小红书", "知乎"].includes(source.name);
-          const sourceStatus = isLocalSocial ? "已连接" : source.status;
-          return <article className="source-card" key={source.id}>
-            <div className="source-card-head"><span className="source-logo large">{initials(source.name)}</span><div><h3>{source.name}</h3><span>{source.coverage}</span></div><span className={`connector-status ${["可连接", "可执行", "已连接", "已登录"].includes(sourceStatus) ? "connected" : sourceStatus.includes("待") || sourceStatus.includes("登录") ? "login" : "testing"}`}>{sourceStatus}</span></div>
-            <dl><div><dt>接入方式</dt><dd>{isLocalSocial ? "本机电脑助手" : source.mode}</dd></div><div><dt>最近检查</dt><dd>{isLocalSocial ? "刚刚" : source.lastCheck}</dd></div></dl>
-            <p>{isLocalSocial ? "本机助手已连接，具体账号状态以上方登录检测结果为准" : source.note}</p>
-            <span className="source-action">{["可连接", "可执行", "已连接", "已登录"].includes(sourceStatus) ? "READY TO RUN" : "LOGIN REQUIRED"}</span>
-          </article>;
-        })}
-      </div>
       <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始六条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>
   );

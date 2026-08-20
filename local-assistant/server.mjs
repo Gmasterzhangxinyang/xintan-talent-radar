@@ -17,15 +17,37 @@ const PLATFORM_URLS = {
   "微博": "https://weibo.com/",
   "小红书": "https://www.xiaohongshu.com/explore",
   "知乎": "https://www.zhihu.com/",
+  "EETOP": "https://bbs.eetop.cn/forum.php",
+  "EDA365": "https://bbs.eda365.com/forum.php",
 };
+const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
 mkdirSync(resolve(PROJECT_DIR, "work"), { recursive: true });
-let sessionStates = Object.fromEntries(Object.keys(PLATFORM_URLS).map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
+let sessionStates = Object.fromEntries(SOCIAL_PLATFORMS.map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
 try { sessionStates = { ...sessionStates, ...JSON.parse(readFileSync(SESSION_FILE, "utf8")) }; } catch { /* first launch */ }
 
 function saveSessions() {
   writeFileSync(SESSION_FILE, JSON.stringify(sessionStates, null, 2));
+}
+
+async function probeSource(name, target) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const result = await fetch(target, {
+      method: "GET",
+      redirect: "manual",
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36" },
+    });
+    const restricted = result.status >= 400;
+    return { name, reachable: true, status: restricted ? "restricted" : "connected", httpStatus: result.status, checkedAt: new Date().toISOString(), detail: restricted ? "站点可达，需要浏览器会话" : "网络连接正常" };
+  } catch (error) {
+    return { name, reachable: false, status: "offline", httpStatus: 0, checkedAt: new Date().toISOString(), detail: error?.name === "AbortError" ? "连接超时" : "无法连接站点" };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function allowBrowser(request, response) {
@@ -81,7 +103,11 @@ const server = http.createServer(async (request, response) => {
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/browser-sessions") {
-    return json(response, 200, { sessions: Object.keys(PLATFORM_URLS).map((platform) => ({ platform, ...sessionStates[platform], profileName: "本机默认浏览器" })) });
+    return json(response, 200, { sessions: SOCIAL_PLATFORMS.map((platform) => ({ platform, ...sessionStates[platform], profileName: "本机默认浏览器" })) });
+  }
+  if (request.method === "GET" && url.pathname === "/v1/connectivity") {
+    const sources = await Promise.all(Object.entries(PLATFORM_URLS).map(([name, target]) => probeSource(name, target)));
+    return json(response, 200, { checkedAt: new Date().toISOString(), sources });
   }
   if (request.method === "POST" && url.pathname === "/v1/browser-sessions/open") {
     try {
@@ -90,8 +116,10 @@ const server = http.createServer(async (request, response) => {
       if (!target) return json(response, 400, { error: "暂不支持该平台" });
       execFile("/usr/bin/open", [target], (error) => {
         if (error) return json(response, 500, { error: "无法打开浏览器" });
-        sessionStates[String(platform)] = { status: "browser_open", lastCheckedAt: new Date().toISOString() };
-        saveSessions();
+        if (SOCIAL_PLATFORMS.includes(String(platform))) {
+          sessionStates[String(platform)] = { status: "browser_open", lastCheckedAt: new Date().toISOString() };
+          saveSessions();
+        }
         json(response, 200, { ok: true, message: `已在本机浏览器打开${platform}` });
       });
     } catch {
@@ -102,7 +130,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "POST" && url.pathname === "/v1/browser-sessions/confirm") {
     try {
       const { platform } = await readJson(request);
-      if (!PLATFORM_URLS[String(platform)]) return json(response, 400, { error: "暂不支持该平台" });
+      if (!SOCIAL_PLATFORMS.includes(String(platform))) return json(response, 400, { error: "该来源不需要登录确认" });
       sessionStates[String(platform)] = { status: "logged_in", lastCheckedAt: new Date().toISOString() };
       saveSessions();
       return json(response, 200, { ok: true, message: `${platform}已确认登录` });
