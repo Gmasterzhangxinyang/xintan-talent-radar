@@ -126,9 +126,6 @@ export default function Home() {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [showStartupSetup, setShowStartupSetup] = useState(false);
-  const [startupSetupStep, setStartupSetupStep] = useState<"ready" | "opened">("ready");
-  const [startupSetupBusy, setStartupSetupBusy] = useState(false);
-  const [startupSetupError, setStartupSetupError] = useState("");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState(0);
@@ -165,35 +162,11 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  async function openStartupSources() {
-    setStartupSetupBusy(true); setStartupSetupError("");
-    try {
-      const health = await fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" });
-      if (!health.ok) throw new Error("没有检测到芯探电脑助手，请先运行桌面的启动程序");
-      await Promise.all(ALL_SOURCES.map(async (platform) => {
-        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
-        });
-        if (!response.ok) throw new Error(`${platform}打开失败`);
-      }));
-      setStartupSetupStep("opened");
-    } catch (setupError) { setStartupSetupError(setupError instanceof Error ? setupError.message : "数据源打开失败"); }
-    finally { setStartupSetupBusy(false); }
-  }
-
-  async function confirmStartupSources() {
-    setStartupSetupBusy(true); setStartupSetupError("");
-    try {
-      await Promise.all(SOCIAL_SOURCES.map(async (platform) => {
-        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/confirm`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
-        });
-        if (!response.ok) throw new Error(`${platform}登录确认失败`);
-      }));
-      window.sessionStorage.setItem("xintan-source-setup-complete", "1");
-      setShowStartupSetup(false); setView("sources"); setToast("六个数据源配置已记录，可以开始运行任务");
-    } catch (setupError) { setStartupSetupError(setupError instanceof Error ? setupError.message : "登录状态记录失败"); }
-    finally { setStartupSetupBusy(false); }
+  function enterSourceSetup() {
+    window.sessionStorage.setItem("xintan-source-setup-complete", "1");
+    setShowStartupSetup(false);
+    setView("sources");
+    setToast("请按需逐个配置数据源");
   }
 
   const filteredLeads = useMemo(() => {
@@ -456,11 +429,7 @@ export default function Home() {
 
       {showStartupSetup && (
         <StartupSetupModal
-          step={startupSetupStep}
-          busy={startupSetupBusy}
-          error={startupSetupError}
-          onOpen={() => void openStartupSources()}
-          onConfirm={() => void confirmStartupSources()}
+          onConfigure={enterSourceSetup}
           onClose={() => setShowStartupSetup(false)}
         />
       )}
@@ -663,6 +632,7 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
   const [sessionMessage, setSessionMessage] = useState("");
   const [connectivity, setConnectivity] = useState<SourceConnectivity[]>([]);
   const [checkingSources, setCheckingSources] = useState(false);
+  const [checkingPlatform, setCheckingPlatform] = useState("");
 
   const refreshSources = useCallback(async () => {
     setCheckingSources(true); setSessionMessage("");
@@ -741,34 +711,29 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
     finally { setOpeningPlatform(""); }
   }
 
-  async function prepareAccounts() {
-    setOpeningPlatform("__all"); setSessionMessage("");
+  async function checkPlatform(platform: string) {
+    setCheckingPlatform(platform); setSessionMessage("");
     try {
-      const waiting = sessions.filter((session) => session.status === "browser_open").map((session) => session.platform);
-      const targets = waiting.length ? waiting : SOCIAL_SOURCES.filter((platform) => sessions.find((session) => session.platform === platform)?.status !== "logged_in");
-      await Promise.all(targets.map(async (platform) => {
-        const endpoint = waiting.length ? "confirm" : "open";
-        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/${endpoint}`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
-        });
-        if (!response.ok) throw new Error(`${platform}${waiting.length ? "确认失败" : "打开失败"}`);
-      }));
-      if (waiting.length) {
-        setSessions((current) => current.map((session) => waiting.includes(session.platform) ? { ...session, status: "logged_in", lastCheckedAt: new Date().toISOString() } : session));
-        setSessionMessage(`${waiting.join("、")} 已确认登录，可以返回运行任务`);
-      } else {
-        setSessions((current) => current.map((session) => targets.includes(session.platform) ? { ...session, status: "browser_open", lastCheckedAt: new Date().toISOString() } : session));
-        setSessionMessage("登录页已打开；完成登录后回到这里点击“确认登录完成”");
-      }
-    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "账号准备失败"); }
-    finally { setOpeningPlatform(""); }
+      const [connectivityResponse, sessionResponse] = await Promise.all([
+        fetch(`${LOCAL_ASSISTANT_URL}/v1/connectivity`, { cache: "no-store" }),
+        fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" }),
+      ]);
+      const connectivityResult = await connectivityResponse.json() as { sources?: SourceConnectivity[]; error?: string };
+      const sessionResult = await sessionResponse.json() as { sessions?: BrowserSessionState[]; error?: string };
+      if (!connectivityResponse.ok) throw new Error(connectivityResult.error ?? `${platform}检测失败`);
+      setConnectivity(connectivityResult.sources ?? []);
+      if (sessionResponse.ok) setSessions(sessionResult.sessions ?? []);
+      const sourceResult = connectivityResult.sources?.find((item) => item.name === platform);
+      setSessionMessage(sourceResult?.reachable ? `${platform}连接正常` : `${platform}暂时无法连接${sourceResult?.detail ? `：${sourceResult.detail}` : ""}`);
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : `${platform}检测失败`); }
+    finally { setCheckingPlatform(""); }
   }
 
   const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "等待检测" : "待连接";
   const reachableCount = connectivity.filter((item) => item.reachable).length;
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>本机助手自动连接，不需要配置地址或密钥。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span>{settings.status === "connected" && sessions.some((session) => session.status !== "logged_in") && <button className="ghost-button" disabled={openingPlatform === "__all"} onClick={() => void prepareAccounts()}>{openingPlatform === "__all" ? "处理中…" : sessions.some((session) => session.status === "browser_open") ? "确认登录完成" : "打开登录页"}</button>}<button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
+      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>每个平台独立配置；账号和 Cookie 只保存在当前电脑。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
         <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/6 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
@@ -787,7 +752,10 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
             <span className="source-logo large">{initials(source.name)}</span>
             <div className="source-connection-copy"><b>{source.name}</b><span>{check?.detail ?? source.coverage}</span></div>
             <em className={tone}>{label}</em>
-            <button disabled={settings.status !== "connected" || openingPlatform === source.name} onClick={() => void (isSocial && waitingConfirmation ? confirmPlatform(source.name) : openPlatform(source.name))}>{openingPlatform === source.name ? "处理中…" : isSocial && waitingConfirmation ? "确认登录" : isSocial && session?.status !== "logged_in" ? "登录" : "打开"}</button>
+            <div className="source-card-actions">
+              <button disabled={settings.status !== "connected" || checkingPlatform === source.name} onClick={() => void checkPlatform(source.name)}>{checkingPlatform === source.name ? "检测中…" : "检测"}</button>
+              <button disabled={settings.status !== "connected" || openingPlatform === source.name} onClick={() => void (isSocial && waitingConfirmation ? confirmPlatform(source.name) : openPlatform(source.name))}>{openingPlatform === source.name ? "处理中…" : isSocial && waitingConfirmation ? "确认登录" : isSocial && session?.status !== "logged_in" ? "配置" : "重新配置"}</button>
+            </div>
           </article>;
         })}
       </div>
@@ -812,7 +780,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }, [onChanged]);
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>一次检测六个来源；需要登录的平台直接在本机浏览器完成。</p></div></div>
+      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>六个平台独立配置、独立检测；需要登录的平台直接在本机浏览器完成。</p></div></div>
       <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
@@ -909,26 +877,20 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   );
 }
 
-function StartupSetupModal({ step, busy, error, onOpen, onConfirm, onClose }: {
-  step: "ready" | "opened"; busy: boolean; error: string;
-  onOpen: () => void; onConfirm: () => void; onClose: () => void;
-}) {
+function StartupSetupModal({ onConfigure, onClose }: { onConfigure: () => void; onClose: () => void }) {
   return (
     <div className="modal-backdrop startup-backdrop" role="presentation">
       <section className="startup-setup-modal" role="dialog" aria-modal="true" aria-labelledby="startup-setup-title">
-        <div className="startup-step">STARTUP CHECK · {step === "ready" ? "01" : "02"}/02</div>
+        <div className="startup-step">STARTUP CHECK</div>
         <div className="startup-icon"><span>XT</span><i /></div>
         <p className="eyebrow">SOURCE SETUP</p>
-        <h2 id="startup-setup-title">{step === "ready" ? "启动前，先配置数据源" : "请在专用浏览器完成登录"}</h2>
-        <p>{step === "ready"
-          ? "点击一次，芯探会在专用浏览器中打开抖音、微博、小红书、知乎、EETOP 和 EDA365。"
-          : "逐个平台完成登录或必要设置。登录信息只保存在这台电脑，不会上传到芯探服务器。"}</p>
+        <h2 id="startup-setup-title">按需配置数据源</h2>
+        <p>每个平台都可以单独打开、登录和检测。完成一次后，芯探会在这台电脑上保留对应会话。</p>
         <div className="startup-source-row">{ALL_SOURCES.map((source) => <span key={source}>{initials(source)}<small>{source}</small></span>)}</div>
-        {step === "opened" && <div className="startup-hint"><b>浏览器窗口已经打开</b><span>全部配置完成后，再回到这里点击下方按钮。</span></div>}
-        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="startup-hint"><b>不必一次配置全部</b><span>进入“数据源”后，选择当前需要的平台逐个配置即可。</span></div>
         <div className="startup-actions">
-          <button className="ghost-button" disabled={busy} onClick={onClose}>稍后配置</button>
-          <button className="primary-button" disabled={busy} onClick={step === "ready" ? onOpen : onConfirm}>{busy ? "正在处理…" : step === "ready" ? "打开全部数据源" : "我已配置完成"}</button>
+          <button className="ghost-button" onClick={onClose}>稍后配置</button>
+          <button className="primary-button" onClick={onConfigure}>进入数据源配置</button>
         </div>
       </section>
     </div>
