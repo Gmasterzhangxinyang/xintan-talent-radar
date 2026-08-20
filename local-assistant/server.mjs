@@ -4,6 +4,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { chromium } from "playwright-core";
 
 const HOST = "127.0.0.1";
 const PORT = 8765;
@@ -21,14 +22,122 @@ const PLATFORM_URLS = {
   "EDA365": "https://bbs.eda365.com/forum.php",
 };
 const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
+const searchJobs = new Map();
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
+const BROWSER_PROFILE_DIR = resolve(PROJECT_DIR, "work", "browser-profile");
+const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 mkdirSync(resolve(PROJECT_DIR, "work"), { recursive: true });
 let sessionStates = Object.fromEntries(SOCIAL_PLATFORMS.map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
-try { sessionStates = { ...sessionStates, ...JSON.parse(readFileSync(SESSION_FILE, "utf8")) }; } catch { /* first launch */ }
+try {
+  const saved = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+  if (saved?.profile === "xintan-dedicated-v1") sessionStates = { ...sessionStates, ...saved.sessions };
+} catch { /* first launch */ }
+let browserContext;
+let browserConnection;
 
 function saveSessions() {
-  writeFileSync(SESSION_FILE, JSON.stringify(sessionStates, null, 2));
+  writeFileSync(SESSION_FILE, JSON.stringify({ profile: "xintan-dedicated-v1", sessions: sessionStates }, null, 2));
+}
+
+async function ensureBrowser() {
+  if (browserContext) return browserContext;
+  try {
+    browserConnection = await chromium.connectOverCDP("http://127.0.0.1:9222");
+    browserContext = browserConnection.contexts()[0];
+    if (browserContext) {
+      browserConnection.on("disconnected", () => { browserConnection = undefined; browserContext = undefined; });
+      return browserContext;
+    }
+  } catch { /* start a dedicated browser below */ }
+  browserContext = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
+    executablePath: CHROME_PATH,
+    headless: false,
+    viewport: null,
+    args: ["--start-maximized", "--remote-debugging-port=9222", "--disable-blink-features=AutomationControlled"],
+  });
+  browserContext.on("close", () => { browserContext = undefined; });
+  return browserContext;
+}
+
+async function openControlledPage(target) {
+  const context = await ensureBrowser();
+  const page = await context.newPage();
+  await page.goto(target, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
+  await page.bringToFront();
+  return page;
+}
+
+function searchUrl(platform, queries) {
+  const keyword = queries.filter(Boolean).slice(0, 8).join(" ").trim();
+  const encoded = encodeURIComponent(keyword);
+  if (platform === "抖音") return `https://www.douyin.com/search/${encoded}?type=general`;
+  if (platform === "微博") return `https://s.weibo.com/weibo?q=${encoded}`;
+  if (platform === "小红书") return `https://www.xiaohongshu.com/search_result?keyword=${encoded}`;
+  if (platform === "知乎") return `https://www.zhihu.com/search?type=content&q=${encoded}`;
+  return PLATFORM_URLS[platform];
+}
+
+async function processSearchJob(job, queries) {
+  try {
+    const page = await openControlledPage(job.searchUrl);
+    if (!SOCIAL_PLATFORMS.includes(job.platform)) {
+      const forumSearchUrl = new URL("/search.php?mod=forum", PLATFORM_URLS[job.platform]).toString();
+      await page.goto(forumSearchUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+      const searchInput = page.locator("input[name='srchtxt'], input[name='keyword'], input[type='search'], input[type='text']").first();
+      if (await searchInput.count()) {
+        await searchInput.fill(queries.slice(0, 6).join(" "));
+        await searchInput.press("Enter");
+        await page.waitForTimeout(2500);
+      }
+    }
+    searchJobs.set(job.jobId, { ...job, status: "running", progress: 35, currentAction: `正在读取${job.platform}公开检索结果` });
+    await page.waitForTimeout(2500);
+    for (let index = 0; index < 3; index += 1) {
+      await page.evaluate(() => window.scrollBy(0, Math.max(700, window.innerHeight * 0.8))).catch(() => undefined);
+      await page.waitForTimeout(900);
+    }
+    const anchors = await page.locator("a[href]").evaluateAll((elements) => elements.map((element) => {
+      const anchor = element;
+      const container = anchor.closest("article, li, [role='listitem']") || anchor.parentElement;
+      const snippet = String(container?.innerText || anchor.innerText || "").replace(/\s+/g, " ").trim();
+      return { url: anchor.href, title: String(anchor.innerText || "").replace(/\s+/g, " ").trim(), snippet };
+    })).catch(() => []);
+    const expectedHost = new URL(PLATFORM_URLS[job.platform]).hostname.replace(/^www\./, "");
+    const loweredQueries = queries.map((item) => item.toLowerCase()).filter(Boolean);
+    const seen = new Set();
+    const results = [];
+    for (const item of anchors) {
+      let parsed;
+      try { parsed = new URL(item.url); } catch { continue; }
+      if (!parsed.hostname.replace(/^www\./, "").endsWith(expectedHost)) continue;
+      const snippet = item.snippet.slice(0, 800);
+      if (snippet.length < 12 || snippet.length > 800 || seen.has(parsed.toString())) continue;
+      if (loweredQueries.length && !loweredQueries.some((query) => snippet.toLowerCase().includes(query))) continue;
+      seen.add(parsed.toString());
+      results.push({
+        source: job.platform, externalId: parsed.toString(), url: parsed.toString(),
+        author: item.title.slice(0, 60) || "公开用户", authorId: "", publishedAt: "未公开", snippet,
+      });
+      if (results.length >= 30) break;
+    }
+    const title = await page.title().catch(() => "");
+    const needsLogin = /登录|sign in|login/i.test(`${title} ${page.url()}`) && results.length === 0;
+    searchJobs.set(job.jobId, {
+      ...job, status: needsLogin ? "waiting_login" : "completed", progress: 100, fetched: results.length, results,
+      currentAction: needsLogin ? `${job.platform}需要登录后继续` : `${job.platform}已读取 ${results.length} 条公开结果`,
+      diagnostic: results.length ? undefined : { pageUrl: page.url(), pageTitle: title, anchorCount: anchors.length, samples: anchors.slice(0, 5) },
+      completedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    searchJobs.set(job.jobId, {
+      ...job, status: "failed", progress: 100, fetched: 0, results: [],
+      currentAction: error instanceof Error && error.message.includes("ProcessSingleton")
+        ? "芯探专用浏览器正在被旧进程占用，请关闭旧窗口后重试"
+        : "页面加载或采集失败，请在专用浏览器中检查页面",
+      completedAt: new Date().toISOString(),
+    });
+  }
 }
 
 async function probeSource(name, target) {
@@ -99,11 +208,11 @@ const server = http.createServer(async (request, response) => {
       ok: true,
       name: "芯探电脑助手",
       liveViewUrl: `http://${HOST}:${PORT}/live`,
-      capabilities: ["open_platform", "screen_capture", "browser_sessions"],
+      capabilities: ["open_platform", "screen_capture", "browser_sessions", "search_tasks"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/browser-sessions") {
-    return json(response, 200, { sessions: SOCIAL_PLATFORMS.map((platform) => ({ platform, ...sessionStates[platform], profileName: "本机默认浏览器" })) });
+    return json(response, 200, { sessions: SOCIAL_PLATFORMS.map((platform) => ({ platform, ...sessionStates[platform], profileName: "芯探专用浏览器" })) });
   }
   if (request.method === "GET" && url.pathname === "/v1/connectivity") {
     const sources = await Promise.all(Object.entries(PLATFORM_URLS).map(([name, target]) => probeSource(name, target)));
@@ -114,18 +223,15 @@ const server = http.createServer(async (request, response) => {
       const { platform } = await readJson(request);
       const target = PLATFORM_URLS[String(platform)];
       if (!target) return json(response, 400, { error: "暂不支持该平台" });
-      execFile("/usr/bin/open", [target], (error) => {
-        if (error) return json(response, 500, { error: "无法打开浏览器" });
-        if (SOCIAL_PLATFORMS.includes(String(platform))) {
-          sessionStates[String(platform)] = { status: "browser_open", lastCheckedAt: new Date().toISOString() };
-          saveSessions();
-        }
-        json(response, 200, { ok: true, message: `已在本机浏览器打开${platform}` });
-      });
+      void openControlledPage(target).catch(() => undefined);
+      if (SOCIAL_PLATFORMS.includes(String(platform))) {
+        sessionStates[String(platform)] = { status: "browser_open", lastCheckedAt: new Date().toISOString() };
+        saveSessions();
+      }
+      return json(response, 200, { ok: true, message: `已在芯探专用浏览器打开${platform}` });
     } catch {
-      return json(response, 400, { error: "请求格式不正确" });
+      return json(response, 500, { error: "无法启动芯探专用浏览器" });
     }
-    return;
   }
   if (request.method === "POST" && url.pathname === "/v1/browser-sessions/confirm") {
     try {
@@ -138,6 +244,40 @@ const server = http.createServer(async (request, response) => {
       return json(response, 400, { error: "请求格式不正确" });
     }
   }
+  if (request.method === "POST" && url.pathname === "/v1/search-tasks") {
+    try {
+      const payload = await readJson(request);
+      const platform = String(payload.platform ?? "");
+      const target = PLATFORM_URLS[platform];
+      if (!target) return json(response, 400, { error: "暂不支持该平台" });
+      const jobId = String(payload.jobId ?? `local-${Date.now()}`);
+      const queries = Array.isArray(payload.queries) ? payload.queries.map(String) : [];
+      const destination = searchUrl(platform, queries);
+      const needsLogin = SOCIAL_PLATFORMS.includes(platform) && sessionStates[platform]?.status !== "logged_in";
+      const job = {
+        jobId, platform, status: needsLogin ? "waiting_login" : "running", progress: 10,
+        currentAction: needsLogin ? `已打开${platform}，等待你完成登录` : `已在${platform}打开关键词检索`,
+        liveViewUrl: `http://${HOST}:${PORT}/live`, searchUrl: destination, createdAt: new Date().toISOString(),
+      };
+      searchJobs.set(jobId, job);
+      void processSearchJob(job, queries);
+      return json(response, 202, job);
+    } catch {
+      return json(response, 400, { error: "任务格式不正确" });
+    }
+  }
+  const jobMatch = url.pathname.match(/^\/v1\/search-tasks\/([^/]+)$/);
+  if (request.method === "GET" && jobMatch) {
+    const job = searchJobs.get(decodeURIComponent(jobMatch[1]));
+    return job ? json(response, 200, job) : json(response, 404, { error: "任务不存在" });
+  }
+  const cancelMatch = url.pathname.match(/^\/v1\/search-tasks\/([^/]+)\/cancel$/);
+  if (request.method === "POST" && cancelMatch) {
+    const jobId = decodeURIComponent(cancelMatch[1]);
+    const job = searchJobs.get(jobId);
+    if (job) searchJobs.set(jobId, { ...job, status: "cancelled", currentAction: "任务已取消" });
+    return json(response, 200, { ok: true });
+  }
   if (request.method === "GET" && url.pathname === "/screen.jpg") return captureScreen(response);
   if (request.method === "GET" && url.pathname === "/live") {
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -149,3 +289,11 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   process.stdout.write(`芯探电脑助手已启动：http://${HOST}:${PORT}\n关闭此窗口会停止电脑连接。\n`);
 });
+
+async function shutdown() {
+  await browserContext?.close().catch(() => undefined);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2_000).unref();
+}
+process.once("SIGINT", () => { void shutdown(); });
+process.once("SIGTERM", () => { void shutdown(); });

@@ -125,6 +125,10 @@ export default function Home() {
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
+  const [showStartupSetup, setShowStartupSetup] = useState(false);
+  const [startupSetupStep, setStartupSetupStep] = useState<"ready" | "opened">("ready");
+  const [startupSetupBusy, setStartupSetupBusy] = useState(false);
+  const [startupSetupError, setStartupSetupError] = useState("");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState(0);
@@ -152,6 +156,7 @@ export default function Home() {
     // Initial server synchronization for the client dashboard.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadState();
+    if (!window.sessionStorage.getItem("xintan-source-setup-complete")) setShowStartupSetup(true);
   }, []);
 
   useEffect(() => {
@@ -159,6 +164,37 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(""), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  async function openStartupSources() {
+    setStartupSetupBusy(true); setStartupSetupError("");
+    try {
+      const health = await fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" });
+      if (!health.ok) throw new Error("没有检测到芯探电脑助手，请先运行桌面的启动程序");
+      await Promise.all(ALL_SOURCES.map(async (platform) => {
+        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
+        });
+        if (!response.ok) throw new Error(`${platform}打开失败`);
+      }));
+      setStartupSetupStep("opened");
+    } catch (setupError) { setStartupSetupError(setupError instanceof Error ? setupError.message : "数据源打开失败"); }
+    finally { setStartupSetupBusy(false); }
+  }
+
+  async function confirmStartupSources() {
+    setStartupSetupBusy(true); setStartupSetupError("");
+    try {
+      await Promise.all(SOCIAL_SOURCES.map(async (platform) => {
+        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/confirm`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
+        });
+        if (!response.ok) throw new Error(`${platform}登录确认失败`);
+      }));
+      window.sessionStorage.setItem("xintan-source-setup-complete", "1");
+      setShowStartupSetup(false); setView("sources"); setToast("六个数据源配置已记录，可以开始运行任务");
+    } catch (setupError) { setStartupSetupError(setupError instanceof Error ? setupError.message : "登录状态记录失败"); }
+    finally { setStartupSetupBusy(false); }
+  }
 
   const filteredLeads = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -186,14 +222,69 @@ export default function Home() {
     if (runningTask) return;
     setRunningTask(task.id);
     setRunProgress(8);
-    const timer = window.setInterval(() => {
-      setRunProgress((value) => Math.min(value + Math.ceil(Math.random() * 14), 92));
-    }, 360);
     try {
+      type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string };
+      type LocalJob = { jobId: string; status: string; progress: number; fetched: number; currentAction: string; liveViewUrl: string; results?: LocalResult[] };
+      const localJobs: Record<string, LocalJob> = {};
+      let localCandidates: LocalResult[] = [];
+      const requiresComputer = task.sources.some((source) => SOCIAL_SOURCES.includes(source));
+      try {
+        const health = await fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" });
+        if (!health.ok) throw new Error("本机助手未启动");
+        if (requiresComputer) {
+          const sessionResponse = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" });
+          const sessionPayload = await sessionResponse.json() as { sessions?: BrowserSessionState[] };
+          const requiredSocial = task.sources.filter((source) => SOCIAL_SOURCES.includes(source));
+          const missingLogins = requiredSocial.filter((source) => sessionPayload.sessions?.find((session) => session.platform === source)?.status !== "logged_in");
+          if (missingLogins.length) {
+            for (const platform of missingLogins) {
+              await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/open`, {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
+              });
+            }
+            setView("sources");
+            throw new Error(`已打开 ${missingLogins.join("、")} 登录页；请完成登录并在数据源页确认后再运行`);
+          }
+        }
+        const queries = [...new Set([...task.techKeywords, ...task.companyKeywords, ...task.signalKeywords])].slice(0, 12);
+        for (let index = 0; index < task.sources.length; index += 1) {
+          const source = task.sources[index];
+          const jobId = `local-${crypto.randomUUID()}`;
+          const dispatch = await fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId, taskId: task.id, platform: source, queries, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange }),
+          });
+          const job = await dispatch.json() as Partial<LocalJob> & { error?: string };
+          if (!dispatch.ok) throw new Error(job.error ?? `${source}无法打开`);
+          localJobs[source] = {
+            jobId: String(job.jobId ?? jobId), status: String(job.status ?? "running"),
+            progress: safeNumber(job.progress ?? 10), fetched: safeNumber(job.fetched),
+            currentAction: String(job.currentAction ?? `已在${source}打开关键词检索`),
+            liveViewUrl: String(job.liveViewUrl ?? `${LOCAL_ASSISTANT_URL}/live`),
+          };
+          setRunProgress(15 + Math.round(((index + 1) / task.sources.length) * 45));
+        }
+        const terminal = new Set(["completed", "failed", "waiting_login", "cancelled"]);
+        for (let attempt = 0; attempt < 24; attempt += 1) {
+          const updates = await Promise.all(Object.entries(localJobs).map(async ([source, job]) => {
+            const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
+            return [source, response.ok ? await response.json() as LocalJob : job] as const;
+          }));
+          for (const [source, job] of updates) localJobs[source] = job;
+          localCandidates = updates.flatMap(([, job]) => Array.isArray(job.results) ? job.results : []);
+          setRunProgress(62 + Math.round(((attempt + 1) / 24) * 24));
+          if (updates.every(([, job]) => terminal.has(job.status))) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+        }
+      } catch (localError) {
+        if (requiresComputer) throw localError instanceof Error ? localError : new Error("请先启动并登录芯探专用浏览器");
+      }
+      setRunProgress(90);
       const response = await fetch("/api/state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "runTask", taskId: task.id }),
+        body: JSON.stringify({ action: "runTask", taskId: task.id, localJobs, localCandidates }),
       });
       const result = await response.json() as { valid?: number; status?: string; message?: string; error?: string };
       if (!response.ok) throw new Error(result.error || "任务运行失败");
@@ -203,7 +294,6 @@ export default function Home() {
     } catch (runError) {
       setToast(runError instanceof Error ? runError.message : "任务运行失败");
     } finally {
-      window.clearInterval(timer);
       window.setTimeout(() => {
         setRunningTask(null);
         setRunProgress(0);
@@ -304,7 +394,7 @@ export default function Home() {
               <span>⌕</span>
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
-            <button className="ghost-button" onClick={() => setShowGuide(true)}>使用引导</button>
+            <button className="ghost-button" onClick={() => { setStartupSetupStep("ready"); setStartupSetupError(""); setShowStartupSetup(true); }}>配置数据源</button>
             <button className="primary-button" onClick={() => { setEditingTask(null); setShowTaskModal(true); }}>＋ 新建任务</button>
           </div>
         </header>
@@ -361,6 +451,17 @@ export default function Home() {
             setView("tasks");
             setToast(wasEditing ? "检索任务已更新" : "检索任务已创建，可立即运行");
           }}
+        />
+      )}
+
+      {showStartupSetup && (
+        <StartupSetupModal
+          step={startupSetupStep}
+          busy={startupSetupBusy}
+          error={startupSetupError}
+          onOpen={() => void openStartupSources()}
+          onConfirm={() => void confirmStartupSources()}
+          onClose={() => setShowStartupSetup(false)}
         />
       )}
 
@@ -640,11 +741,34 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
     finally { setOpeningPlatform(""); }
   }
 
+  async function prepareAccounts() {
+    setOpeningPlatform("__all"); setSessionMessage("");
+    try {
+      const waiting = sessions.filter((session) => session.status === "browser_open").map((session) => session.platform);
+      const targets = waiting.length ? waiting : SOCIAL_SOURCES.filter((platform) => sessions.find((session) => session.platform === platform)?.status !== "logged_in");
+      await Promise.all(targets.map(async (platform) => {
+        const endpoint = waiting.length ? "confirm" : "open";
+        const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions/${endpoint}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
+        });
+        if (!response.ok) throw new Error(`${platform}${waiting.length ? "确认失败" : "打开失败"}`);
+      }));
+      if (waiting.length) {
+        setSessions((current) => current.map((session) => waiting.includes(session.platform) ? { ...session, status: "logged_in", lastCheckedAt: new Date().toISOString() } : session));
+        setSessionMessage(`${waiting.join("、")} 已确认登录，可以返回运行任务`);
+      } else {
+        setSessions((current) => current.map((session) => targets.includes(session.platform) ? { ...session, status: "browser_open", lastCheckedAt: new Date().toISOString() } : session));
+        setSessionMessage("登录页已打开；完成登录后回到这里点击“确认登录完成”");
+      }
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "账号准备失败"); }
+    finally { setOpeningPlatform(""); }
+  }
+
   const statusLabel = settings.status === "connected" ? "已连接" : settings.status === "failed" ? "连接失败" : settings.status === "saved" ? "等待检测" : "待连接";
   const reachableCount = connectivity.filter((item) => item.reachable).length;
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>本机助手自动连接，不需要配置地址或密钥。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
+      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>本机助手自动连接，不需要配置地址或密钥。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span>{settings.status === "connected" && sessions.some((session) => session.status !== "logged_in") && <button className="ghost-button" disabled={openingPlatform === "__all"} onClick={() => void prepareAccounts()}>{openingPlatform === "__all" ? "处理中…" : sessions.some((session) => session.status === "browser_open") ? "确认登录完成" : "打开登录页"}</button>}<button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
         <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/6 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
@@ -676,7 +800,8 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   const [localConnected, setLocalConnected] = useState(false);
   const latestJobs = jobs.filter((job, index) => jobs.findIndex((candidate) => candidate.taskId === job.taskId && candidate.source === job.source) === index);
   const waitingJobs = localConnected ? 0 : latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
-  const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status));
+  const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)
+    && !job.currentAction.includes("ProcessSingleton") && !job.currentAction.includes("Failed to create"));
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [heartbeatClock, setHeartbeatClock] = useState(0);
   const lastHeartbeat = liveJob?.updatedAt ? Date.parse(liveJob.updatedAt) : 0;
@@ -779,6 +904,32 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>
+      </section>
+    </div>
+  );
+}
+
+function StartupSetupModal({ step, busy, error, onOpen, onConfirm, onClose }: {
+  step: "ready" | "opened"; busy: boolean; error: string;
+  onOpen: () => void; onConfirm: () => void; onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop startup-backdrop" role="presentation">
+      <section className="startup-setup-modal" role="dialog" aria-modal="true" aria-labelledby="startup-setup-title">
+        <div className="startup-step">STARTUP CHECK · {step === "ready" ? "01" : "02"}/02</div>
+        <div className="startup-icon"><span>XT</span><i /></div>
+        <p className="eyebrow">SOURCE SETUP</p>
+        <h2 id="startup-setup-title">{step === "ready" ? "启动前，先配置数据源" : "请在专用浏览器完成登录"}</h2>
+        <p>{step === "ready"
+          ? "点击一次，芯探会在专用浏览器中打开抖音、微博、小红书、知乎、EETOP 和 EDA365。"
+          : "逐个平台完成登录或必要设置。登录信息只保存在这台电脑，不会上传到芯探服务器。"}</p>
+        <div className="startup-source-row">{ALL_SOURCES.map((source) => <span key={source}>{initials(source)}<small>{source}</small></span>)}</div>
+        {step === "opened" && <div className="startup-hint"><b>浏览器窗口已经打开</b><span>全部配置完成后，再回到这里点击下方按钮。</span></div>}
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="startup-actions">
+          <button className="ghost-button" disabled={busy} onClick={onClose}>稍后配置</button>
+          <button className="primary-button" disabled={busy} onClick={step === "ready" ? onOpen : onConfirm}>{busy ? "正在处理…" : step === "ready" ? "打开全部数据源" : "我已配置完成"}</button>
+        </div>
       </section>
     </div>
   );

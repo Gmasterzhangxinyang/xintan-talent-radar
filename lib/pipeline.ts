@@ -61,7 +61,22 @@ export async function ingestCandidates(db: D1Database, task: TaskRecord, items: 
   return stats;
 }
 
-export async function runTask(db: D1Database, taskId: string, callbackBase: string) {
+type LocalAgentJob = {
+  jobId?: string;
+  status?: string;
+  progress?: number;
+  fetched?: number;
+  currentAction?: string;
+  liveViewUrl?: string;
+};
+
+export async function runTask(
+  db: D1Database,
+  taskId: string,
+  callbackBase: string,
+  localJobs: Record<string, LocalAgentJob> = {},
+  localCandidates: CandidateItem[] = [],
+) {
   const task = await db.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first<TaskRecord>();
   if (!task) throw new Error("任务不存在");
   if (task.status !== "active") throw new Error("任务已暂停，请先恢复任务");
@@ -72,22 +87,49 @@ export async function runTask(db: D1Database, taskId: string, callbackBase: stri
   const total: IngestStats = { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0 };
   const messages: string[] = [];
   for (const source of parseStringArray(task.sources)) {
+    const sourceCandidates = localCandidates.filter((item) => item.source === source)
+      .map((item) => ({ ...item, source }));
     if (SOCIAL_SOURCES.has(source)) {
+      const localJob = localJobs[source];
+      if (localJob) {
+        const jobId = String(localJob.jobId ?? `local-${crypto.randomUUID()}`).slice(0, 160);
+        const waitingLogin = localJob.status === "waiting_login";
+        const persistedStatus = waitingLogin ? "waiting_login" : localJob.status === "failed" ? "failed" : localJob.status === "completed" ? "completed" : "dispatched";
+        const liveViewUrl = String(localJob.liveViewUrl ?? "").startsWith("http://127.0.0.1:8765/") ? String(localJob.liveViewUrl) : "";
+        const action = String(localJob.currentAction ?? `已在${source}打开关键词检索`).slice(0, 300);
+        await db.prepare(`INSERT OR REPLACE INTO connector_jobs
+          (id, task_id, source, status, dispatched_at, fetched, progress, current_action, live_view_url, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(jobId, task.id, source, persistedStatus, startedAt,
+            Math.max(0, Number(localJob.fetched ?? sourceCandidates.length)), Math.max(0, Math.min(100, Number(localJob.progress ?? 10))), action, liveViewUrl, startedAt).run();
+        if (sourceCandidates.length) {
+          const stats = await ingestCandidates(db, task, sourceCandidates);
+          for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];
+          messages.push(`${source}:获取${stats.fetched}/新增${stats.valid}`);
+        } else if (persistedStatus === "failed") {
+          messages.push(`${source}:失败(${action})`);
+        } else {
+          messages.push(`${source}:${waitingLogin ? "等待登录" : "已打开检索页，未读取到公开结果"}`);
+        }
+        continue;
+      }
       const job = await dispatchComputerAgent({ db, task, source, callbackBase });
       messages.push(`${source}:${job.status === "dispatched" ? "已派发" : job.status === "awaiting_config" ? "等待连接电脑助手" : job.status === "disabled" ? "已停用" : "派发失败"}`);
       continue;
     }
     try {
-      const items = await collectPublicForum(source, task);
+      const items = sourceCandidates.length ? sourceCandidates : await collectPublicForum(source, task);
       const stats = await ingestCandidates(db, task, items);
       for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];
       messages.push(`${source}:获取${stats.fetched}/新增${stats.valid}`);
     } catch (error) {
-      messages.push(`${source}:失败(${error instanceof Error ? error.message : "未知错误"})`);
+      messages.push(localJobs[source]
+        ? `${source}:浏览器已打开（网页直采受限）`
+        : `${source}:失败(${error instanceof Error ? error.message : "未知错误"})`);
     }
   }
   const finishedAt = new Date().toISOString();
-  const awaiting = messages.some((message) => message.includes("等待连接"));
+  const awaiting = messages.some((message) => message.includes("等待"));
   const failed = messages.some((message) => message.includes("失败"));
   const status = failed || awaiting ? "部分完成" : messages.some((message) => message.includes("已派发")) ? "已派发" : "完成";
   await db.batch([

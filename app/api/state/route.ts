@@ -164,7 +164,19 @@ export async function POST(request: Request) {
     if (action === "runTask") {
       const taskId = String(payload.taskId ?? "");
       const origin = new URL(request.url).origin;
-      return Response.json({ ok: true, ...(await runTask(db, taskId, origin)) });
+      const localJobs = payload.localJobs && typeof payload.localJobs === "object"
+        ? payload.localJobs as Record<string, { jobId?: string; status?: string; progress?: number; fetched?: number; currentAction?: string; liveViewUrl?: string }>
+        : {};
+      const localCandidates = Array.isArray(payload.localCandidates) ? payload.localCandidates.slice(0, 300).map((item) => {
+        const candidate = item && typeof item === "object" ? item as Record<string, unknown> : {};
+        return {
+          source: String(candidate.source ?? "").slice(0, 40), externalId: String(candidate.externalId ?? "").slice(0, 1_000),
+          author: String(candidate.author ?? "公开用户").slice(0, 160), authorId: String(candidate.authorId ?? "").slice(0, 160),
+          publishedAt: String(candidate.publishedAt ?? "未公开").slice(0, 80), snippet: String(candidate.snippet ?? "").slice(0, 5_000),
+          url: String(candidate.url ?? "").slice(0, 2_000),
+        };
+      }) : [];
+      return Response.json({ ok: true, ...(await runTask(db, taskId, origin, localJobs, localCandidates)) });
     }
 
     if (action === "updateTask") {

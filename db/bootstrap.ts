@@ -75,6 +75,21 @@ export async function ensureDatabase() {
     )`),
   ]);
 
+  // CREATE TABLE IF NOT EXISTS does not add columns introduced after the
+  // database was first created. Repair older databases before task execution.
+  const connectorInfo = await db.prepare("PRAGMA table_info(connector_jobs)").all<{ name: string }>();
+  const connectorColumns = new Set(connectorInfo.results.map((column) => column.name));
+  const missingConnectorColumns = [
+    ["progress", "INTEGER NOT NULL DEFAULT 0"],
+    ["current_action", "TEXT NOT NULL DEFAULT ''"],
+    ["live_view_url", "TEXT NOT NULL DEFAULT ''"],
+    ["screenshot_url", "TEXT NOT NULL DEFAULT ''"],
+    ["updated_at", "TEXT NOT NULL DEFAULT ''"],
+  ] as const;
+  for (const [name, definition] of missingConnectorColumns) {
+    if (!connectorColumns.has(name)) await db.prepare(`ALTER TABLE connector_jobs ADD COLUMN ${name} ${definition}`).run();
+  }
+
   const taskCount = await db.prepare("SELECT COUNT(*) AS count FROM tasks").first<{ count: number }>();
   if ((taskCount?.count ?? 0) > 0) return;
 
