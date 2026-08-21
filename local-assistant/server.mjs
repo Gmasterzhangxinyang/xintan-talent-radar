@@ -83,12 +83,13 @@ const AI_DECISION_SCHEMA = {
     actionReason: { type: "string" }, searchQuery: { type: "string" }, crossCheckPlatform: { type: "string" },
     tags: { type: "array", items: { type: "string" }, maxItems: 8 },
     matchedKeywords: { type: "array", items: { type: "string" }, maxItems: 10 },
+    evidenceQuotes: { type: "array", items: { type: "string" }, maxItems: 5 },
     intent: { type: "string", enum: ["强", "中", "无"] },
     intelligenceType: { type: "string", enum: ["人才线索", "企业情报", "无效内容"] },
     score: { type: "integer", minimum: 0, maximum: 100 }, priority: { type: "string", enum: ["A", "B", "C"] },
     confidence: { type: "number", minimum: 0, maximum: 1 }, stopReason: { type: "string" },
   },
-  required: ["decision", "reasoningSummary", "nextAction", "actionReason", "searchQuery", "crossCheckPlatform", "tags", "matchedKeywords", "intent", "intelligenceType", "score", "priority", "confidence", "stopReason"],
+  required: ["decision", "reasoningSummary", "nextAction", "actionReason", "searchQuery", "crossCheckPlatform", "tags", "matchedKeywords", "evidenceQuotes", "intent", "intelligenceType", "score", "priority", "confidence", "stopReason"],
 };
 
 function responseOutputText(payload) {
@@ -107,7 +108,7 @@ async function askAiBrain(observation) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${aiSettings.apiKey}` },
     body: JSON.stringify({
       model: aiSettings.model, store: false, max_output_tokens: 900,
-      instructions: `你是芯片设计行业猎头情报Agent的中央决策大脑。只分析公开或已授权内容。你只能从给定的安全动作中选择下一步，绝不能私信、发布、点赞、关注、上传、下载、输入密码/验证码、绕过验证或离开平台白名单域名。先判断内容是否与任务技术栈、企业或求职/企业信号相关；信息不足时可要求打开站内原文或读取公开评论；输出简短可审计的决策摘要，不输出隐藏思维链。`,
+      instructions: `你是芯片设计行业猎头情报Agent的中央决策大脑。只分析公开或已授权内容。每个候选都已经由电脑Agent打开站内详情并读取可见正文与公开评论，你必须基于详情证据判断，不能只复述列表摘要。evidenceQuotes应给出1至5条简短原文证据；若证据不足则明确指出。你只能从给定的安全动作中选择下一步，绝不能私信、发布、点赞、关注、上传、下载、输入密码/验证码、绕过验证或离开平台白名单域名。输出简短可审计的决策摘要，不输出隐藏思维链。`,
       input: [{ role: "user", content: [{ type: "input_text", text: JSON.stringify(observation) }] }],
       text: { format: { type: "json_schema", name: "talent_agent_decision", strict: true, schema: AI_DECISION_SCHEMA } },
     }),
@@ -374,41 +375,47 @@ async function processSearchJob(job, queries) {
         const item = { ...candidate, platform: job.platform, snippet: candidate.snippet.slice(0, 800) };
         const position = analysisTrace.length + 1;
         const projectedTotal = Math.min(maxItems, analysisTrace.length + candidates.length);
-        const pendingTrace = { index: position, url: parsed.toString(), snippet: item.snippet, author: candidate.title.slice(0, 60) || "公开用户", status: "thinking", decision: "待判断", reason: "AI中枢正在评价内容并选择下一步", tags: [], matchedKeywords: [], intent: "无", intelligenceType: "待判断", score: 0, priority: "C", nextAction: "thinking", actionReason: "", confidence: 0, policyStatus: "checking", model: aiSettings.model };
+        const pendingTrace = { index: position, url: parsed.toString(), snippet: item.snippet, author: candidate.title.slice(0, 60) || "公开用户", status: "opening_detail", decision: "待判断", reason: "电脑Agent正在打开详情并读取正文", tags: [], matchedKeywords: [], evidenceQuotes: [], detailExcerpt: "", intent: "无", intelligenceType: "待判断", score: 0, priority: "C", nextAction: "open_source", actionReason: "每条候选必须进入详情深读", confidence: 0, policyStatus: "正在校验站内详情地址", model: aiSettings.model };
         searchJobs.set(job.jobId, {
-          ...job, status: "running", phase: "thinking", progress: Math.min(88, 28 + position * 5), fetched: results.length,
+          ...job, status: "running", phase: "opening_detail", progress: Math.min(88, 26 + position * 5), fetched: results.length,
           inspected: position, kept: results.length, filtered: analysisTrace.filter((entry) => entry.decision === "过滤").length,
-          currentAction: `AI中枢正在思考第 ${position} 条的价值与下一步动作`,
+          currentAction: `正在打开第 ${position} 条详情：${pendingTrace.author}`,
           currentItem: pendingTrace, analysisTrace: [...analysisTrace, pendingTrace],
         });
-        await showItemAnalysis(page, item, { decision: "思考中", priority: "-", score: 0, reason: "AI中枢正在读取任务目标、原文和安全策略", keep: true }, position, projectedTotal, "reading");
-        let brainDecision = await askAiBrain({
-          task: { name: job.taskName ?? "猎头情报任务", techKeywords: job.techKeywords, companyKeywords: job.companyKeywords, signalKeywords: job.signalKeywords, excludeKeywords: job.excludeKeywords, timeRange: job.timeRange },
-          platform: job.platform, pageUrl: page.url(), candidate: { author: pendingTrace.author, snippet: item.snippet, url: item.url },
-          progress: { item: position, inspected: analysisTrace.length, kept: results.length },
-          safeActions: ["keep", "filter", "open_source", "read_comments", "refine_search", "scroll_next", "cross_check", "stop"],
+        await showItemAnalysis(page, item, { decision: "打开详情", priority: "-", score: 0, reason: "强制逐条进入站内原文，不使用列表摘要直接定案", keep: true }, position, projectedTotal, "reading");
+        const detailPolicy = enforceAgentPolicy({ nextAction: "open_source", decision: "needs_more" }, job, item);
+        if (!detailPolicy.allowed) throw new Error(`详情打开被安全策略阻止：${detailPolicy.reason}`);
+        const searchPageUrl = page.url();
+        await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await page.waitForTimeout(1400);
+        const landedUrl = page.url();
+        const landedHost = new URL(landedUrl).hostname.replace(/^www\./, "");
+        if (!landedHost.endsWith(expectedHost)) throw new Error("详情页跳转超出平台白名单域名");
+        const detailText = (await page.locator("body").innerText({ timeout: 6000 }).catch(() => "")).replace(/\s+/g, " ").trim();
+        const commentTexts = await page.locator("[class*='comment'], [id*='comment'], [aria-label*='评论']").evaluateAll((elements) => elements.map((element) => String(element.innerText || "").replace(/\s+/g, " ").trim()).filter((text) => text.length >= 8).slice(0, 20)).catch(() => []);
+        const detailExcerpt = detailText.slice(0, 520);
+        const readingTrace = { ...pendingTrace, status: "reading_detail", reason: "正在提取正文、公开评论和可回溯证据", detailExcerpt, policyStatus: "站内详情地址校验通过" };
+        searchJobs.set(job.jobId, {
+          ...job, status: "running", phase: "reading_detail", progress: Math.min(90, 28 + position * 5), fetched: results.length,
+          inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
+          currentAction: `正在深读第 ${position} 条详情：正文 ${detailText.length} 字，公开评论 ${commentTexts.length} 条`,
+          currentItem: readingTrace, analysisTrace: [...analysisTrace, readingTrace],
         });
-        agentSteps += 1;
+        await showItemAnalysis(page, { ...item, marker: "" }, { decision: "深读详情", priority: "-", score: 0, reason: `正文 ${detailText.length} 字 · 公开评论 ${commentTexts.length} 条 · 随后交给AI判断`, keep: true }, position, projectedTotal, "detail");
+        const brainDecision = await askAiBrain({
+          task: { name: job.taskName ?? "猎头情报任务", techKeywords: job.techKeywords, companyKeywords: job.companyKeywords, signalKeywords: job.signalKeywords, excludeKeywords: job.excludeKeywords, timeRange: job.timeRange },
+          platform: job.platform, pageUrl: landedUrl, candidate: { author: pendingTrace.author, listSnippet: item.snippet, url: item.url },
+          mandatoryDeepRead: { visibleDetail: detailText.slice(0, 5000), publicComments: commentTexts.join("\n").slice(0, 2400), detailCharacters: detailText.length, publicCommentBlocks: commentTexts.length },
+          progress: { item: position, inspected: analysisTrace.length, kept: results.length },
+          safeActions: ["keep", "filter", "refine_search", "scroll_next", "cross_check", "stop"],
+          instruction: "这是已打开的详情页。必须引用详情证据给出最终判断；不要再次要求打开原文或读取评论。",
+        });
+        agentSteps += 2;
         let policy = enforceAgentPolicy(brainDecision, job, item);
-        let executedAction = policy.action;
-        if (policy.allowed && ["open_source", "read_comments"].includes(policy.action) && agentSteps < aiSettings.policy.maxStepsPerSource) {
-          searchJobs.set(job.jobId, { ...job, status: "running", phase: "acting", progress: Math.min(90, 29 + position * 5), fetched: results.length, inspected: position, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `AI决定${policy.action === "read_comments" ? "打开原文并读取公开评论" : "打开原文补充证据"}：${brainDecision.actionReason}`, currentItem: { ...pendingTrace, reasoningSummary: brainDecision.reasoningSummary, nextAction: policy.action, actionReason: brainDecision.actionReason, policyStatus: policy.reason }, analysisTrace: [...analysisTrace] });
-          const searchPageUrl = page.url();
-          await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-          await page.waitForTimeout(1200);
-          const detailText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-          brainDecision = await askAiBrain({
-            task: { name: job.taskName ?? "猎头情报任务", techKeywords: job.techKeywords, companyKeywords: job.companyKeywords, signalKeywords: job.signalKeywords, excludeKeywords: job.excludeKeywords },
-            platform: job.platform, candidate: { author: pendingTrace.author, snippet: item.snippet, url: item.url },
-            toolResult: { action: policy.action, visibleDetail: detailText.replace(/\s+/g, " ").slice(0, 3500) },
-            instruction: "根据补充证据给出最终保留或过滤决定，并选择安全的下一步。",
-          });
-          agentSteps += 1;
-          policy = enforceAgentPolicy(brainDecision, job, item);
-          executedAction = `${executedAction} → ${policy.action}`;
-          await page.goto(searchPageUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-          await page.waitForTimeout(700);
-        }
+        if (["open_source", "read_comments"].includes(policy.action)) policy = { ...policy, action: "scroll_next", reason: `${policy.reason}；详情与公开评论已完成强制读取` };
+        const executedAction = `打开详情 → 读取正文${commentTexts.length ? `与${commentTexts.length}条公开评论` : "（未检测到公开评论）"} → ${policy.action}`;
+        await page.goto(searchPageUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+        await page.waitForTimeout(700);
         const keep = brainDecision.decision === "keep";
         const exploring = brainDecision.decision === "needs_more" && ["refine_search", "cross_check", "scroll_next"].includes(policy.action);
         const analysis = {
@@ -417,7 +424,7 @@ async function processSearchJob(job, queries) {
           intelligenceType: brainDecision.intelligenceType, score: brainDecision.score, priority: brainDecision.priority,
           reasoningSummary: brainDecision.reasoningSummary, nextAction: executedAction, actionReason: brainDecision.actionReason,
           confidence: brainDecision.confidence, stopReason: brainDecision.stopReason, policyStatus: policy.reason,
-          model: brainDecision.model, responseId: brainDecision.responseId,
+          model: brainDecision.model, responseId: brainDecision.responseId, evidenceQuotes: brainDecision.evidenceQuotes, detailExcerpt,
         };
         const finishedTrace = { ...pendingTrace, ...analysis, status: "completed" };
         analysisTrace.push(finishedTrace);
@@ -531,9 +538,9 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "0.7.1",
+      version: "0.7.2",
       operatorWindow: "direct",
-      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "per_item_analysis", "analysis_audit", "source_verifications"],
+      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {

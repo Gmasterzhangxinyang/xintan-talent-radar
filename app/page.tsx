@@ -74,7 +74,7 @@ type AnalysisTraceItem = {
   decision: "保留" | "过滤" | "继续探索"; reason: string; tags: string[]; matchedKeywords: string[];
   excludeMatches: string[]; intent: string; intelligenceType: string; score: number; priority: string;
   reasoningSummary?: string; nextAction?: string; actionReason?: string; confidence?: number;
-  policyStatus?: string; model?: string; stopReason?: string;
+  policyStatus?: string; model?: string; stopReason?: string; evidenceQuotes?: string[]; detailExcerpt?: string;
 };
 
 type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string };
@@ -577,25 +577,25 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
   if (!job) return null;
   const trace = job.analysisTrace ?? [];
   const current = job.currentItem ?? trace.at(-1);
-  const phaseOrder = ["searching", "locating", "analyzing", "loading_more", "completed"];
+  const phaseOrder = ["searching", "locating", "opening_detail", "reading_detail", "analyzing", "loading_more", "completed"];
   const currentPhase = job.phase === "loading_more" ? "analyzing" : job.phase ?? "searching";
   const phaseIndex = currentPhase === "waiting_login" ? 0 : Math.max(0, phaseOrder.indexOf(currentPhase));
   return (
     <section className="analysis-workspace" aria-live="polite">
       <div className="analysis-head">
-        <div><p className="eyebrow">LIVE ANALYSIS AUDIT</p><h3>逐条分析，而不是只看滚动</h3><span>浏览器会停在当前内容；每个平台的命中词、判断依据和取舍都在这里同步显示。</span></div>
+        <div><p className="eyebrow">LIVE DEEP-READ AUDIT</p><h3>每一条都打开详情深读</h3><span>列表只负责发现候选；电脑会逐条进入原文，读取正文与公开评论，再由AI形成结论。</span></div>
         <div className={`analysis-running-state ${running ? "active" : "complete"}`}><i />{running ? "分析进行中" : "本轮分析记录"}</div>
       </div>
       <div className="analysis-source-tabs" role="tablist" aria-label="平台分析记录">
         {sources.map((name) => {
           const item = jobs[name];
           return <button className={name === source ? "active" : ""} role="tab" aria-selected={name === source} key={name} onClick={() => setSelectedSource(name)}>
-            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "analyzing" ? "逐条分析" : "准备中"}</small>
+            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "opening_detail" ? "打开详情" : item.phase === "reading_detail" ? "深读原文" : item.phase === "analyzing" ? "AI判断" : "准备中"}</small>
           </button>;
         })}
       </div>
       <div className="analysis-phase-row">
-        {["打开检索", "定位内容", "逐条判断", "形成线索"].map((label, index) => <div className={index <= Math.min(3, phaseIndex) ? "done" : ""} key={label}><i>{index < Math.min(3, phaseIndex) || job.status === "completed" ? "✓" : index + 1}</i><span>{label}</span></div>)}
+        {["打开检索", "定位候选", "打开详情", "深读证据", "AI定案"].map((label, index) => <div className={index <= Math.min(4, phaseIndex) ? "done" : ""} key={label}><i>{index < Math.min(4, phaseIndex) || job.status === "completed" ? "✓" : index + 1}</i><span>{label}</span></div>)}
       </div>
       <div className="analysis-summary">
         <span><small>当前动作</small><strong>{job.currentAction}</strong></span>
@@ -608,7 +608,9 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
           <div className="current-analysis-label"><span>{current?.status === "thinking" ? "AI THINKING" : "LATEST DECISION"}</span>{current && <em className={current.decision === "保留" ? "keep" : current.decision === "继续探索" ? "explore" : "drop"}>{current.decision}</em>}</div>
           {current ? <>
             <blockquote>{current.snippet}</blockquote>
+            {current.detailExcerpt && <div className="analysis-detail-excerpt"><b>详情页可见内容</b><p>{current.detailExcerpt}</p></div>}
             <div className="analysis-keywords"><b>命中依据</b>{current.matchedKeywords.length ? current.matchedKeywords.map((keyword) => <span key={keyword}>{keyword}</span>) : <span className="muted">无任务关键词</span>}</div>
+            {!!current.evidenceQuotes?.length && <div className="analysis-evidence"><b>AI引用的原文证据</b>{current.evidenceQuotes.map((quote, index) => <p key={`${index}-${quote}`}>“{quote}”</p>)}</div>}
             <dl>
               <div><dt>内容类型</dt><dd>{current.intelligenceType}</dd></div>
               <div><dt>求职意向</dt><dd>{current.intent}</dd></div>

@@ -52,10 +52,10 @@ test("exposes a per-item analysis audit instead of blind scrolling", async () =>
     readFile(schemaPath, "utf8"),
     readFile(new URL("../drizzle/0006_analysis_audit.sql", import.meta.url), "utf8"),
   ]);
-  for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
+  for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "每一条都打开详情深读", "详情页可见内容", "AI引用的原文证据", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
     assert.match(page, new RegExp(capability));
   }
-  for (const capability of ["askAiBrain", "enforceAgentPolicy", "showItemAnalysis", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
+  for (const capability of ["askAiBrain", "enforceAgentPolicy", "showItemAnalysis", "mandatoryDeepRead", "evidenceQuotes", "reading_detail", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
     assert.match(assistant, new RegExp(capability));
   }
   assert.match(schema, /analysisTrace/);
