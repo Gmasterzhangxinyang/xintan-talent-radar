@@ -108,7 +108,7 @@ async function askAiBrain(observation) {
   delete textObservation.visualFrames;
   const inputContent = [{ type: "input_text", text: JSON.stringify(textObservation) }, ...visualFrames.map((imageUrl) => ({ type: "input_image", image_url: imageUrl }))];
   const response = await fetch(endpoint, {
-    method: "POST", signal: AbortSignal.timeout(45_000),
+    method: "POST", signal: AbortSignal.timeout(30_000),
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${aiSettings.apiKey}` },
     body: JSON.stringify({
       model: aiSettings.model, store: false, max_output_tokens: 900,
@@ -122,6 +122,19 @@ async function askAiBrain(observation) {
   const output = responseOutputText(payload);
   if (!output) throw new Error("AI中枢没有返回结构化决策");
   return { ...JSON.parse(output), model: payload.model ?? aiSettings.model, responseId: payload.id ?? "" };
+}
+
+async function askAiBrainWithRetry(observation) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await askAiBrain(attempt === 0 ? observation : { ...observation, visualFrames: [] });
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await new Promise((resolveRetry) => setTimeout(resolveRetry, 700));
+    }
+  }
+  throw lastError;
 }
 
 function enforceAgentPolicy(decision, job, item) {
@@ -497,7 +510,7 @@ async function processSearchJob(job, queries) {
           currentItem: readingTrace, analysisTrace: [...analysisTrace, readingTrace],
         });
         await showItemAnalysis(page, { ...item, marker: "" }, { decision: "深读详情", priority: "-", score: 0, reason: `正文 ${detailText.length} 字 · 公开评论 ${commentTexts.length} 条 · 随后交给AI判断`, keep: true }, position, projectedTotal, "detail");
-        const brainDecision = await askAiBrain({
+        const aiObservation = {
           task: { name: job.taskName ?? "猎头情报任务", techKeywords: job.techKeywords, companyKeywords: job.companyKeywords, signalKeywords: job.signalKeywords, excludeKeywords: job.excludeKeywords, timeRange: job.timeRange },
           platform: job.platform, pageUrl: landedUrl, candidate: { author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt, listSnippet: item.snippet, url: item.url },
           mandatoryDeepRead: { contentKind: hasVideo ? "视频" : "图文", visibleDetail: detailText.slice(0, 5000), publicComments: commentTexts.join("\n").slice(0, 4000), detailCharacters: detailText.length, publicCommentBlocks: commentTexts.length, visualFrameCount: visualFrames.length },
@@ -505,7 +518,26 @@ async function processSearchJob(job, queries) {
           progress: { item: position, inspected: analysisTrace.length, kept: results.length },
           safeActions: ["keep", "filter", "refine_search", "scroll_next", "cross_check", "stop"],
           instruction: "这是已打开的详情页。必须引用详情证据给出最终判断；不要再次要求打开原文或读取评论。",
+        };
+        searchJobs.set(job.jobId, {
+          ...job, status: "running", phase: "calling_ai", progress: Math.min(91, 29 + position * 5), fetched: results.length,
+          inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
+          currentAction: `第 ${position}/${maxItems} 条已完成证据采集，正在调用AI中枢判断`,
+          currentItem: readingTrace, analysisTrace: [...analysisTrace, readingTrace],
         });
+        let aiFailure = "";
+        let brainDecision;
+        try {
+          brainDecision = await askAiBrainWithRetry(aiObservation);
+        } catch (error) {
+          aiFailure = error instanceof Error ? error.message : String(error);
+          brainDecision = {
+            decision: "needs_more", reasoningSummary: `正文与公开信息已采集，但AI中枢两次调用失败，本条进入人工复核：${aiFailure.slice(0, 160)}`,
+            nextAction: "scroll_next", actionReason: "单条AI故障不终止整轮任务，继续处理下一候选", searchQuery: "", crossCheckPlatform: "",
+            tags: ["AI待复核"], matchedKeywords: [], evidenceQuotes: [], intent: "无", intelligenceType: "无效内容",
+            score: 0, priority: "C", confidence: 0, stopReason: "AI调用失败", model: aiSettings.model, responseId: "",
+          };
+        }
         agentSteps += 2;
         let policy = enforceAgentPolicy(brainDecision, job, item);
         if (["open_source", "read_comments"].includes(policy.action)) policy = { ...policy, action: "scroll_next", reason: `${policy.reason}；详情与公开评论已完成强制读取` };
@@ -524,6 +556,7 @@ async function processSearchJob(job, queries) {
           confidence: brainDecision.confidence, stopReason: brainDecision.stopReason, policyStatus: policy.reason,
           model: brainDecision.model, responseId: brainDecision.responseId, evidenceQuotes: brainDecision.evidenceQuotes, detailExcerpt,
           commentRead: commentTexts.length, commentTarget: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), contentKind: hasVideo ? "视频" : "图文",
+          aiError: aiFailure,
         };
         const finishedTrace = { ...metadataTrace, ...analysis, status: "completed" };
         analysisTrace.push(finishedTrace);
@@ -590,14 +623,14 @@ async function processSearchJob(job, queries) {
   } catch (error) {
     const current = searchJobs.get(job.jobId) ?? job;
     const failureMessage = error instanceof Error ? error.message : String(error);
-    const isAiFailure = /AI中枢|模型服务|Responses API|API Key|结构化决策/i.test(failureMessage);
+    const isAiFailure = current.phase === "calling_ai" || /AI中枢|模型服务|Responses API|API Key|结构化决策|aborted|timeout|fetch failed/i.test(failureMessage);
     searchJobs.set(job.jobId, {
-      ...current, status: "failed", phase: "failed", progress: 100, results: [],
+      ...current, status: "failed", phase: "failed", progress: 100, results: [], error: failureMessage,
       currentAction: failureMessage.includes("ProcessSingleton")
         ? "芯探专用浏览器正在被旧进程占用，请关闭旧窗口后重试"
         : isAiFailure
           ? `AI中枢调用失败：${failureMessage.slice(0, 180)}`
-          : "页面加载或采集失败，请在专用浏览器中检查页面",
+          : `执行失败：${failureMessage.slice(0, 180)}`,
       completedAt: new Date().toISOString(),
     });
   }
@@ -652,9 +685,9 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "0.8.2",
+      version: "0.8.3",
       operatorWindow: "direct",
-      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "per_source_targets", "multi_query_search_plan", "no_early_item_stop", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
+      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "ai_retry", "ai_fail_soft", "policy_guard", "agent_loop", "per_source_targets", "multi_query_search_plan", "no_early_item_stop", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {
