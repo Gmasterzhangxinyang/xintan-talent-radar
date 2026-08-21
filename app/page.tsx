@@ -101,7 +101,7 @@ type SourceVerification = {
 };
 
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
-const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EETOP", "EDA365"];
+const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EDA365"];
 const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
@@ -113,7 +113,6 @@ const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
 ];
 
 function initials(name: string) {
-  if (name.includes("EETOP")) return "EE";
   if (name.includes("EDA")) return "ED";
   return name.slice(0, 1);
 }
@@ -488,7 +487,7 @@ function Overview({
       </section>
 
       <section className="metric-grid">
-        <Metric label="累计分析内容" value={totals.fetched.toLocaleString()} delta="跨6个来源" tone="ink" />
+        <Metric label="累计分析内容" value={totals.fetched.toLocaleString()} delta="跨5个来源" tone="ink" />
         <Metric label="有效情报线索" value={totals.valid.toLocaleString()} delta="过滤后结果" tone="green" />
         <Metric label="A级高价值" value={String(totals.high)} delta="建议优先处理" tone="orange" />
         <Metric label="人工已确认" value={String(totals.confirmed)} delta="反馈用于优化" tone="blue" />
@@ -656,7 +655,7 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
       setConnectivity(connectivityResult.sources ?? []);
       setSessions(sessionResult.sessions ?? []);
       if (verificationResponse.ok) setVerifications(verificationResult.verifications ?? []);
-      setSessionMessage("六个数据源已完成检测");
+      setSessionMessage("五个数据源已完成检测");
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "数据源检测失败"); }
     finally { setCheckingSources(false); }
   }, []);
@@ -756,10 +755,10 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
       <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>每个平台独立配置；账号和 Cookie 只保存在当前电脑。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
-        <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/6 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
+        <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/5 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
         <div className="pair-actions">{settings.status === "connected" && <button className="ghost-button live-view-button" onClick={() => void showOperatorWindow()}>打开操作小窗</button>}<button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "重新连接"}</button></div>
       </div>
-      <div className="source-center-head"><div><b>6 Sources</b><span>网络连通与账号状态</span></div><small>账号数据仅保留在本机</small></div>
+      <div className="source-center-head"><div><b>5 Sources</b><span>网络连通与账号状态</span></div><small>账号数据仅保留在本机</small></div>
       <div className="source-connection-grid">
         {sources.map((source) => {
           const check = connectivity.find((item) => item.name === source.name);
@@ -807,7 +806,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>六个平台独立配置；配置完成后自动验收查找、滚动、内容读取和来源链接。</p></div></div>
+      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>五个平台独立配置；配置完成后自动验收查找、滚动、内容读取和来源链接。</p></div></div>
       <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">DIRECT BROWSER OPERATION</p><h3>独立操作窗口</h3><span>无需录屏。任务会直接打开一个小型浏览器窗口，AI 的搜索、点击、输入和滚动都在里面真实发生。</span></div><div className="live-controls"><button disabled={openingOperator || !localConnected} onClick={() => void showOperatorWindow()}>{openingOperator ? "正在打开…" : "唤起操作窗口"}</button>{liveJob && <span className={`job-state ${liveJob.status}`}>{liveJob.status === "running" ? "正在操作" : liveJob.status === "waiting_login" ? "等待登录" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
@@ -816,7 +815,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
           <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}</div>
         </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "启动本机助手后，任务会自动打开独立操作窗口。" : "运行任务后会自动弹出一个小型浏览器窗口，你可以直接观察全部操作。"}</span></div>}
       </section>
-      <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始六条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
+      <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始五条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>
   );
 }
@@ -830,7 +829,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   const [excludes, setExcludes] = useState((task?.excludeKeywords ?? ["培训", "招生", "广告"]).join("、"));
   const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
   const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
-  const [sources, setSources] = useState(task?.sources ?? ["抖音", "微博", "EETOP"]);
+  const [sources, setSources] = useState(task?.sources.filter((source) => ALL_SOURCES.includes(source)) ?? ["抖音", "微博", "EDA365"]);
   const [schedule, setSchedule] = useState(task?.schedule ?? "每天 09:00");
   const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);

@@ -4,7 +4,6 @@ import { parseStringArray, unique } from "./json";
 import { loadConnectorSettings, validateAgentEndpoint } from "./connector-settings";
 
 const FORUMS: Record<string, string> = {
-  EETOP: "https://bbs.eetop.cn/forum.php",
   EDA365: "https://bbs.eda365.com/forum.php",
 };
 export const SOCIAL_SOURCES = new Set(["抖音", "微博", "小红书", "知乎"]);

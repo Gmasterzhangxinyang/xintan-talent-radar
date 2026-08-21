@@ -16,7 +16,6 @@ const PLATFORM_URLS = {
   "微博": "https://weibo.com/",
   "小红书": "https://www.xiaohongshu.com/explore",
   "知乎": "https://www.zhihu.com/",
-  "EETOP": "https://bbs.eetop.cn/forum.php",
   "EDA365": "https://bbs.eda365.com/forum.php",
 };
 const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
@@ -37,6 +36,7 @@ try {
     verificationStates = saved.verifications ?? {};
   }
 } catch { /* first launch */ }
+delete verificationStates.EETOP;
 let browserContext;
 let browserConnection;
 let operatorPage;
