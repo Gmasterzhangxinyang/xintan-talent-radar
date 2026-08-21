@@ -56,7 +56,7 @@ test("exposes a per-item analysis audit instead of blind scrolling", async () =>
   for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "每一条都打开详情深读", "详情页可见内容", "AI引用的原文证据", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
     assert.match(page, new RegExp(capability));
   }
-  for (const capability of ["askAiBrain", "enforceAgentPolicy", "showItemAnalysis", "mandatoryDeepRead", "evidenceQuotes", "reading_detail", "readCommentsProgressively", "extractPublicMetadata", "visualFrames", "targetItems", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
+  for (const capability of ["askAiBrain", "enforceAgentPolicy", "showItemAnalysis", "buildSearchPlan", "multi_query_search_plan", "no_early_item_stop", "单条内容判断结束不等于整个平台任务结束", "mandatoryDeepRead", "evidenceQuotes", "reading_detail", "readCommentsProgressively", "extractPublicMetadata", "visualFrames", "targetItems", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
     assert.match(assistant, new RegExp(capability));
   }
   assert.match(schema, /analysisTrace/);

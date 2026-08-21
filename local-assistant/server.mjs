@@ -185,6 +185,29 @@ function searchUrl(platform, queries) {
   return PLATFORM_URLS[platform];
 }
 
+function buildSearchPlan(job, queries) {
+  const clean = (values) => [...new Set((Array.isArray(values) ? values : []).map((value) => String(value).trim()).filter(Boolean))];
+  const companies = clean(job.companyKeywords).slice(0, 6);
+  const signals = clean(job.signalKeywords).slice(0, 8);
+  const technologies = clean(job.techKeywords).slice(0, 6);
+  const fallbacks = clean(queries).slice(0, 8);
+  const plan = [];
+  const seen = new Set();
+  const add = (...terms) => {
+    const query = clean(terms).slice(0, 3);
+    const key = query.join(" ");
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    plan.push(query);
+  };
+
+  companies.forEach((company, index) => add(company, signals[index % Math.max(1, signals.length)] || "团队调整"));
+  signals.forEach((signal) => add("芯片", signal));
+  technologies.forEach((technology, index) => add(technology, signals[(index + 2) % Math.max(1, signals.length)] || "看机会"));
+  add(...fallbacks.slice(0, 3));
+  return plan.slice(0, 18).length ? plan.slice(0, 18) : [["芯片"]];
+}
+
 function isContentUrl(platform, parsed) {
   const target = `${parsed.pathname}${parsed.search}`;
   if (platform === "抖音") return /\/(video|note)\//.test(target);
@@ -387,9 +410,12 @@ async function readCommentsProgressively(page, { job, position, target, pendingT
 
 async function processSearchJob(job, queries) {
   try {
-    const page = await openControlledPage(job.searchUrl);
-    await prepareSearchPage(page, job.platform, queries);
-    searchJobs.set(job.jobId, { ...job, status: "running", phase: "locating", progress: 20, currentAction: `正在${job.platform}核对检索词：${queries.slice(0, 5).join("、")}`, analysisTrace: [] });
+    const searchPlan = buildSearchPlan(job, queries);
+    let queryCursor = 0;
+    let activeQuery = searchPlan[queryCursor];
+    const page = await openControlledPage(searchUrl(job.platform, activeQuery));
+    await prepareSearchPage(page, job.platform, activeQuery);
+    searchJobs.set(job.jobId, { ...job, status: "running", phase: "locating", progress: 20, currentAction: `正在${job.platform}核对检索词：${activeQuery.join("、")}`, analysisTrace: [], searchPlan: searchPlan.map((query) => query.join(" ")) });
     await page.waitForTimeout(2200);
     const expectedHost = new URL(PLATFORM_URLS[job.platform]).hostname.replace(/^www\./, "");
     const seenUrls = new Set();
@@ -399,13 +425,14 @@ async function processSearchJob(job, queries) {
     const maxItems = Math.max(1, Math.min(50, Number(job.targetItems ?? aiSettings.policy.maxItemsPerSource ?? 10)));
     let agentSteps = 0;
     let refinements = 0;
-    let stopRequested = false;
     let pendingRefine = "";
     let anchorCount = 0;
-    for (let screen = 0; screen < 12 && analysisTrace.length < maxItems && agentSteps < Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2); screen += 1) {
+    let emptyScreens = 0;
+    const maxSearchScreens = Math.min(60, Math.max(12, maxItems * 3, searchPlan.length * 3));
+    for (let screen = 0; screen < maxSearchScreens && analysisTrace.length < maxItems && agentSteps < Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2); screen += 1) {
       const batch = await page.locator("a[href]").evaluateAll((elements, screenIndex) => elements.map((element, index) => {
         const anchor = element;
-        const container = anchor.closest("article, li, [role='listitem'], .pbw, [class*='note-item'], [class*='search-result'], [class*='feed-card']") || anchor;
+        const container = anchor.closest("article, li, section, [role='listitem'], .pbw, .SearchResult-Card, [class*='SearchResult'], [class*='ContentItem'], [class*='note-item'], [class*='search-result'], [class*='feed-card']") || anchor;
         const snippet = String(container?.innerText || anchor.innerText || "").replace(/\s+/g, " ").trim();
         const marker = `xt-${screenIndex}-${index}`;
         anchor.setAttribute("data-xintan-candidate", marker);
@@ -421,6 +448,8 @@ async function processSearchJob(job, queries) {
             && item.snippet.length >= 12 && item.snippet.length <= 800 && !seenUrls.has(parsed.toString()) && !seenSnippets.has(snippetKey);
         } catch { return false; }
       }).slice(0, Math.max(0, maxItems - analysisTrace.length));
+      if (candidates.length) emptyScreens = 0;
+      else emptyScreens += 1;
       for (const candidate of candidates) {
         const parsed = new URL(candidate.url);
         seenUrls.add(parsed.toString());
@@ -480,6 +509,7 @@ async function processSearchJob(job, queries) {
         agentSteps += 2;
         let policy = enforceAgentPolicy(brainDecision, job, item);
         if (["open_source", "read_comments"].includes(policy.action)) policy = { ...policy, action: "scroll_next", reason: `${policy.reason}；详情与公开评论已完成强制读取` };
+        if (policy.action === "stop" && position < maxItems) policy = { ...policy, action: "scroll_next", reason: `${policy.reason}；单条内容判断结束不等于整个平台任务结束，继续寻找直到 ${maxItems} 条` };
         const executedAction = `打开详情 → 读取正文${commentTexts.length ? `与${commentTexts.length}条公开评论` : "（未检测到公开评论）"} → ${policy.action}`;
         await page.goto(searchPageUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
         await page.evaluate((scrollY) => window.scrollTo(0, scrollY), searchScrollY).catch(() => undefined);
@@ -518,17 +548,28 @@ async function processSearchJob(job, queries) {
           searchJobs.set(job.jobId, { ...job, status: "running", phase: "acting", progress: Math.min(92, 32 + position * 5), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `AI决定调整检索词：${pendingRefine}；原因：${brainDecision.actionReason}`, currentItem: finishedTrace, analysisTrace: [...analysisTrace] });
           break;
         }
-        if (policy.action === "stop") { stopRequested = true; break; }
       }
-      if (stopRequested || analysisTrace.length >= maxItems || agentSteps >= Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2)) break;
+      if (analysisTrace.length >= maxItems || agentSteps >= Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2)) break;
       if (pendingRefine) {
         const refinedUrl = searchUrl(job.platform, [pendingRefine]);
         await page.goto(refinedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
         await prepareSearchPage(page, job.platform, [pendingRefine]);
         await page.waitForTimeout(1600);
         pendingRefine = "";
+        emptyScreens = 0;
         continue;
       }
+      if (emptyScreens >= 3 && queryCursor + 1 < searchPlan.length) {
+        queryCursor += 1;
+        activeQuery = searchPlan[queryCursor];
+        searchJobs.set(job.jobId, { ...job, status: "running", phase: "refining_search", progress: Math.min(88, 34 + analysisTrace.length * 5), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `当前关键词没有新候选，切换第 ${queryCursor + 1}/${searchPlan.length} 组：${activeQuery.join("、")}`, analysisTrace: [...analysisTrace] });
+        await page.goto(searchUrl(job.platform, activeQuery), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+        await prepareSearchPage(page, job.platform, activeQuery);
+        await page.waitForTimeout(1600);
+        emptyScreens = 0;
+        continue;
+      }
+      if (emptyScreens >= 3 && queryCursor + 1 >= searchPlan.length) break;
       searchJobs.set(job.jobId, { ...job, status: "running", phase: "loading_more", progress: Math.min(86, 35 + analysisTrace.length * 4), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `当前屏内容已分析，向下加载更多结果`, analysisTrace: [...analysisTrace] });
       await page.mouse.wheel(0, Math.max(650, await page.evaluate(() => window.innerHeight * 0.78).catch(() => 700))).catch(() => undefined);
       await page.waitForTimeout(1100);
@@ -611,9 +652,9 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "0.8.1",
+      version: "0.8.2",
       operatorWindow: "direct",
-      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "per_source_targets", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
+      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "per_source_targets", "multi_query_search_plan", "no_early_item_stop", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {
