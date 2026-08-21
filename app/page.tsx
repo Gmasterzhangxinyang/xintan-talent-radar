@@ -129,8 +129,9 @@ type AiBrainSettings = {
 };
 
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
-const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EDA365"];
+const ALL_SOURCES = ["知乎", "EDA365", "微博", "小红书", "抖音"];
 const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
+const DEFAULT_SOURCE_LIMITS: Record<string, number> = { 知乎: 15, EDA365: 15, 微博: 8, 小红书: 5, 抖音: 5 };
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
   { id: "overview", label: "工作台", icon: "HM" },
@@ -267,7 +268,7 @@ export default function Home() {
               jobId, taskId: task.id, taskName: task.name, platform: source, queries,
               techKeywords: task.techKeywords, companyKeywords: task.companyKeywords,
               signalKeywords: task.signalKeywords, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange,
-              targetItems: Math.max(1, Math.min(50, Number(task.sourceLimits?.[source] ?? 10))), commentTarget: 20,
+              targetItems: Math.max(1, Math.min(50, Number(task.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10))), commentTarget: 20,
             }),
           });
           const job = await dispatch.json() as Partial<LocalJob> & { error?: string };
@@ -662,7 +663,7 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
             <div className="task-top"><span className={task.status === "active" ? "status-badge active" : "status-badge paused"}>{task.status === "active" ? "运行中" : "已暂停"}</span><div className="task-actions"><button className="more-button" onClick={() => onEdit(task)}>编辑</button><button className="more-button" onClick={() => onToggle(task)}>{task.status === "active" ? "暂停" : "恢复"}</button><button className="more-button danger" onClick={() => onDelete(task)}>删除</button></div></div>
             <h3>{task.name}</h3><p className="task-jd">{task.jd}</p>
             <div className="tag-row">{task.techKeywords.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
-            <div className="source-depth-summary">{task.sources.map((source) => <span key={source}>{source} <b>{task.sourceLimits?.[source] ?? 10}</b>条</span>)}</div>
+            <div className="source-depth-summary">{task.sources.map((source) => <span key={source}>{source} <b>{task.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10}</b>条</span>)}</div>
             <div className="task-meta"><span>来源 <b>{task.sources.length}</b></span><span>线索 <b>{task.discovered}</b></span><span>A级 <b>{task.highValue}</b></span></div>
             <div className="task-schedule"><span>↻ {task.schedule}</span><span>{task.timeRange}</span></div>
             {runningTask === task.id && <div className="progress-track"><span style={{ width: `${runProgress}%` }} /></div>}
@@ -1034,8 +1035,8 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   const [excludes, setExcludes] = useState((task?.excludeKeywords ?? ["培训", "招生", "广告"]).join("、"));
   const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
   const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
-  const [sources, setSources] = useState(task?.sources.filter((source) => ALL_SOURCES.includes(source)) ?? ["抖音", "微博", "EDA365"]);
-  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>(() => Object.fromEntries(ALL_SOURCES.map((source) => [source, Math.max(1, Math.min(50, Number(task?.sourceLimits?.[source] ?? 10)))])));
+  const [sources, setSources] = useState(task?.sources.filter((source) => ALL_SOURCES.includes(source)) ?? ["知乎", "EDA365", "微博"]);
+  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>(() => Object.fromEntries(ALL_SOURCES.map((source) => [source, Math.max(1, Math.min(50, Number(task?.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10)))])));
   const [schedule, setSchedule] = useState(task?.schedule ?? "每天 09:00");
   const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);
@@ -1100,7 +1101,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} /></label>
           <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
           <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
-          <fieldset className="source-depth-fieldset"><legend>每个平台深读多少条</legend><p>例如设置为10：系统会在该平台逐条打开10个内容详情，读完正文和评论后才结束。</p><div className="source-depth-grid">{ALL_SOURCES.map((source) => { const enabled = sources.includes(source); return <label className={enabled ? "enabled" : ""} key={source}><input type="checkbox" checked={enabled} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span><input aria-label={`${source}深读条数`} type="number" min="1" max="50" disabled={!enabled} value={sourceLimits[source]} onChange={(event) => setSourceLimits((current) => ({ ...current, [source]: Math.max(1, Math.min(50, Number(event.target.value) || 1)) }))} /><em>条</em></label>; })}</div></fieldset>
+          <fieldset className="source-depth-fieldset"><legend>每个平台深读多少条</legend><p>默认优先知乎和行业论坛；短内容平台用于补充与交叉验证。每条都会打开详情并读正文和公开评论。</p><div className="source-depth-grid">{ALL_SOURCES.map((source) => { const enabled = sources.includes(source); return <label className={enabled ? "enabled" : ""} key={source}><input type="checkbox" checked={enabled} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span><input aria-label={`${source}深读条数`} type="number" min="1" max="50" disabled={!enabled} value={sourceLimits[source]} onChange={(event) => setSourceLimits((current) => ({ ...current, [source]: Math.max(1, Math.min(50, Number(event.target.value) || 1)) }))} /><em>条</em></label>; })}</div></fieldset>
           {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>

@@ -63,7 +63,7 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     jobId: id, taskId: args.task.id, platform: args.source, queries,
     taskName: args.task.name, techKeywords: parseStringArray(args.task.tech_keywords), companyKeywords: parseStringArray(args.task.company_keywords),
     signalKeywords: parseStringArray(args.task.signal_keywords), excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
-    targetItems: Math.max(1, Math.min(50, Number(sourceLimits[args.source] ?? 10))), commentTarget: 20,
+    targetItems: Math.max(1, Math.min(50, Number(sourceLimits[args.source] ?? ({ 知乎: 15, EDA365: 15, 微博: 8, 小红书: 5, 抖音: 5 }[args.source] ?? 10)))), commentTarget: 20,
     fields: ["snippet", "author", "authorId", "publishedAt", "url"],
     browser: {
       reuseExistingProfile: true, interactive: true, requireExistingLogin: true,
