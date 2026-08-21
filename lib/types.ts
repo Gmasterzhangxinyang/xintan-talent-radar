@@ -10,6 +10,7 @@ export type TaskRecord = {
   exclude_keywords: string;
   schedule: string;
   time_range: string;
+  source_limits?: string;
 };
 
 export type CandidateItem = {

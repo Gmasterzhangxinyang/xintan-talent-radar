@@ -29,6 +29,7 @@ function normalizeTask(row: Record<string, unknown>) {
     lastRunAt: row.last_run_at,
     authorBlacklist: parseJson(row.author_blacklist, []),
     companyBlacklist: parseJson(row.company_blacklist, []),
+    sourceLimits: parseJson(row.source_limits, {}),
     scheduleEnabled: row.schedule_enabled !== 0,
     nextRunAt: row.next_run_at,
   };
@@ -101,7 +102,7 @@ export async function GET() {
     await ensureDatabase();
     const db = getD1();
     const [taskRows, leadRows, runRows, sourceRows, connectorRows] = await Promise.all([
-      db.prepare("SELECT t.*, f.author_blacklist, f.company_blacklist, f.schedule_enabled, f.next_run_at FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id ORDER BY t.created_at DESC").all(),
+      db.prepare("SELECT t.*, f.author_blacklist, f.company_blacklist, f.source_limits, f.schedule_enabled, f.next_run_at FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id ORDER BY t.created_at DESC").all(),
       db.prepare("SELECT * FROM leads ORDER BY score DESC, published_at DESC").all(),
       db.prepare("SELECT * FROM runs ORDER BY started_at DESC LIMIT 30").all(),
       db.prepare("SELECT * FROM sources ORDER BY name").all(),
@@ -153,8 +154,8 @@ export async function POST(request: Request) {
           now,
         )
         ,
-        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, now),
+        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify(task.sourceLimits ?? {}), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, now),
       ]);
       return Response.json({ ok: true, id });
     }
@@ -176,6 +177,7 @@ export async function POST(request: Request) {
           author: String(candidate.author ?? "公开用户").slice(0, 160), authorId: String(candidate.authorId ?? "").slice(0, 160),
           publishedAt: String(candidate.publishedAt ?? "未公开").slice(0, 80), snippet: String(candidate.snippet ?? "").slice(0, 5_000),
           url: String(candidate.url ?? "").slice(0, 2_000),
+          raw: candidate.raw && typeof candidate.raw === "object" ? candidate.raw : {},
         };
       }) : [];
       return Response.json({ ok: true, ...(await runTask(db, taskId, origin, localJobs, localCandidates)) });
@@ -190,8 +192,8 @@ export async function POST(request: Request) {
           .bind(String(task.name ?? "未命名任务"), String(task.jd ?? ""), String(task.status ?? "active"), JSON.stringify(task.sources ?? []),
             JSON.stringify(task.techKeywords ?? []), JSON.stringify(task.companyKeywords ?? []), JSON.stringify(task.signalKeywords ?? []),
             JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "每天 09:00"), String(task.timeRange ?? "近30天"), id),
-        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, new Date().toISOString()),
+        db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify(task.sourceLimits ?? {}), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, new Date().toISOString()),
       ]);
       return Response.json({ ok: true });
     }

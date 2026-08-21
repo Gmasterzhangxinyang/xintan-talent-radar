@@ -57,9 +57,13 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     return { id, status: "awaiting_config" };
   }
   const queries = unique([...parseStringArray(args.task.tech_keywords), ...parseStringArray(args.task.company_keywords), ...parseStringArray(args.task.signal_keywords)]);
+  let sourceLimits: Record<string, number> = {};
+  try { sourceLimits = JSON.parse(args.task.source_limits || "{}"); } catch { /* use default */ }
   const body = {
     jobId: id, taskId: args.task.id, platform: args.source, queries,
-    excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
+    taskName: args.task.name, techKeywords: parseStringArray(args.task.tech_keywords), companyKeywords: parseStringArray(args.task.company_keywords),
+    signalKeywords: parseStringArray(args.task.signal_keywords), excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
+    targetItems: Math.max(1, Math.min(50, Number(sourceLimits[args.source] ?? 10))), commentTarget: 20,
     fields: ["snippet", "author", "authorId", "publishedAt", "url"],
     browser: {
       reuseExistingProfile: true, interactive: true, requireExistingLogin: true,

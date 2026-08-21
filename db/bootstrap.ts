@@ -45,7 +45,7 @@ export async function ensureDatabase() {
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS task_filters (
       task_id TEXT PRIMARY KEY, author_blacklist TEXT NOT NULL DEFAULT '[]',
-      company_blacklist TEXT NOT NULL DEFAULT '[]', schedule_enabled INTEGER NOT NULL DEFAULT 1,
+      company_blacklist TEXT NOT NULL DEFAULT '[]', source_limits TEXT NOT NULL DEFAULT '{}', schedule_enabled INTEGER NOT NULL DEFAULT 1,
       next_run_at TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS raw_items (
@@ -97,6 +97,10 @@ export async function ensureDatabase() {
   ] as const;
   for (const [name, definition] of missingConnectorColumns) {
     if (!connectorColumns.has(name)) await db.prepare(`ALTER TABLE connector_jobs ADD COLUMN ${name} ${definition}`).run();
+  }
+  const filterInfo = await db.prepare("PRAGMA table_info(task_filters)").all<{ name: string }>();
+  if (!filterInfo.results.some((column) => column.name === "source_limits")) {
+    await db.prepare("ALTER TABLE task_filters ADD COLUMN source_limits TEXT NOT NULL DEFAULT '{}'").run();
   }
 
   // EETOP has been removed from the supported product surface. Clean older

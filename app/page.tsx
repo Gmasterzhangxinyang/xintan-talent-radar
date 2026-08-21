@@ -21,6 +21,7 @@ type Task = {
   lastRunAt?: string | null;
   authorBlacklist?: string[];
   companyBlacklist?: string[];
+  sourceLimits?: Record<string, number>;
   scheduleEnabled?: boolean;
   nextRunAt?: string | null;
 };
@@ -71,17 +72,20 @@ type Source = {
 
 type AnalysisTraceItem = {
   index: number; url: string; snippet: string; author: string; status: string;
+  authorId?: string; publishedAt?: string;
   decision: "保留" | "过滤" | "继续探索"; reason: string; tags: string[]; matchedKeywords: string[];
   excludeMatches: string[]; intent: string; intelligenceType: string; score: number; priority: string;
   reasoningSummary?: string; nextAction?: string; actionReason?: string; confidence?: number;
   policyStatus?: string; model?: string; stopReason?: string; evidenceQuotes?: string[]; detailExcerpt?: string;
+  commentRead?: number; commentTarget?: number; commentPreview?: string; contentKind?: string;
 };
 
-type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string };
+type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string; raw?: unknown };
 
 type LocalJob = {
   jobId: string; platform?: string; status: string; phase?: string; progress: number; fetched: number;
   inspected?: number; kept?: number; filtered?: number; currentAction: string; liveViewUrl: string;
+  targetItems?: number; commentTarget?: number;
   currentItem?: AnalysisTraceItem; analysisTrace?: AnalysisTraceItem[]; results?: LocalResult[];
 };
 
@@ -263,6 +267,7 @@ export default function Home() {
               jobId, taskId: task.id, taskName: task.name, platform: source, queries,
               techKeywords: task.techKeywords, companyKeywords: task.companyKeywords,
               signalKeywords: task.signalKeywords, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange,
+              targetItems: Math.max(1, Math.min(50, Number(task.sourceLimits?.[source] ?? 10))), commentTarget: 20,
             }),
           });
           const job = await dispatch.json() as Partial<LocalJob> & { error?: string };
@@ -270,14 +275,17 @@ export default function Home() {
           localJobs[source] = {
             jobId: String(job.jobId ?? jobId), status: String(job.status ?? "running"),
             progress: safeNumber(job.progress ?? 10), fetched: safeNumber(job.fetched),
+            targetItems: safeNumber(job.targetItems ?? task.sourceLimits?.[source] ?? 10), commentTarget: safeNumber(job.commentTarget ?? 20),
             currentAction: String(job.currentAction ?? `已在${source}打开关键词检索`),
             liveViewUrl: String(job.liveViewUrl ?? `${LOCAL_ASSISTANT_URL}/live`),
           };
           setLiveJobs({ ...localJobs });
           setRunProgress(15 + Math.round(((index + 1) / task.sources.length) * 45));
         }
-        const terminal = new Set(["completed", "failed", "waiting_login", "cancelled"]);
-        for (let attempt = 0; attempt < 90; attempt += 1) {
+        const terminal = new Set(["completed", "partial", "failed", "waiting_login", "cancelled"]);
+        const requestedDeepReads = task.sources.reduce((sum, source) => sum + Math.max(1, Number(task.sourceLimits?.[source] ?? 10)), 0);
+        const maxPollAttempts = Math.min(3600, Math.max(150, requestedDeepReads * 25));
+        for (let attempt = 0; attempt < maxPollAttempts; attempt += 1) {
           const updates = await Promise.all(Object.entries(localJobs).map(async ([source, job]) => {
             const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
             return [source, response.ok ? await response.json() as LocalJob : job] as const;
@@ -285,7 +293,7 @@ export default function Home() {
           for (const [source, job] of updates) localJobs[source] = job;
           setLiveJobs({ ...localJobs });
           localCandidates = updates.flatMap(([, job]) => Array.isArray(job.results) ? job.results : []);
-          setRunProgress(62 + Math.round(((attempt + 1) / 90) * 24));
+          setRunProgress(62 + Math.round(((attempt + 1) / maxPollAttempts) * 24));
           if (updates.every(([, job]) => terminal.has(job.status))) break;
           await new Promise((resolve) => window.setTimeout(resolve, 1_200));
         }
@@ -585,7 +593,7 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
         {sources.map((name) => {
           const item = jobs[name];
           return <button className={name === source ? "active" : ""} role="tab" aria-selected={name === source} key={name} onClick={() => setSelectedSource(name)}>
-            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "opening_detail" ? "打开详情" : item.phase === "reading_detail" ? "深读原文" : item.phase === "analyzing" ? "AI判断" : "准备中"}</small>
+            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "达标" : item.status === "partial" ? "未达条数" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "opening_detail" ? "打开详情" : item.phase === "reading_comments" ? "逐条读评论" : item.phase === "reading_detail" ? "深读原文" : item.phase === "analyzing" ? "AI判断" : "准备中"}</small>
           </button>;
         })}
       </div>
@@ -594,7 +602,7 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
       </div>
       <div className="analysis-summary">
         <span><small>当前动作</small><strong>{job.currentAction}</strong></span>
-        <span><small>已检查</small><strong>{safeNumber(job.inspected)}</strong></span>
+        <span><small>深读进度</small><strong>{safeNumber(job.inspected)}/{safeNumber(job.targetItems || job.inspected)}</strong></span>
         <span><small>保留</small><strong className="keep">{safeNumber(job.kept ?? job.fetched)}</strong></span>
         <span><small>过滤</small><strong className="drop">{safeNumber(job.filtered)}</strong></span>
       </div>
@@ -608,6 +616,8 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
             {!!current.evidenceQuotes?.length && <div className="analysis-evidence"><b>AI引用的原文证据</b>{current.evidenceQuotes.map((quote, index) => <p key={`${index}-${quote}`}>“{quote}”</p>)}</div>}
             <dl>
               <div><dt>内容类型</dt><dd>{current.intelligenceType}</dd></div>
+              <div><dt>公开作者</dt><dd>{current.author}{current.authorId ? ` · ${current.authorId}` : " · ID未公开"} · {current.publishedAt ?? "时间未公开"}</dd></div>
+              <div><dt>内容载体</dt><dd>{current.contentKind ?? "正在识别"} · 已逐条读取 {safeNumber(current.commentRead)}/{safeNumber(current.commentTarget)} 条评论</dd></div>
               <div><dt>求职意向</dt><dd>{current.intent}</dd></div>
               <div><dt>价值等级</dt><dd>{current.priority} · {current.score}分</dd></div>
               <div><dt>AI决策摘要</dt><dd>{current.reasoningSummary ?? current.reason}</dd></div>
@@ -652,6 +662,7 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
             <div className="task-top"><span className={task.status === "active" ? "status-badge active" : "status-badge paused"}>{task.status === "active" ? "运行中" : "已暂停"}</span><div className="task-actions"><button className="more-button" onClick={() => onEdit(task)}>编辑</button><button className="more-button" onClick={() => onToggle(task)}>{task.status === "active" ? "暂停" : "恢复"}</button><button className="more-button danger" onClick={() => onDelete(task)}>删除</button></div></div>
             <h3>{task.name}</h3><p className="task-jd">{task.jd}</p>
             <div className="tag-row">{task.techKeywords.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
+            <div className="source-depth-summary">{task.sources.map((source) => <span key={source}>{source} <b>{task.sourceLimits?.[source] ?? 10}</b>条</span>)}</div>
             <div className="task-meta"><span>来源 <b>{task.sources.length}</b></span><span>线索 <b>{task.discovered}</b></span><span>A级 <b>{task.highValue}</b></span></div>
             <div className="task-schedule"><span>↻ {task.schedule}</span><span>{task.timeRange}</span></div>
             {runningTask === task.id && <div className="progress-track"><span style={{ width: `${runProgress}%` }} /></div>}
@@ -780,7 +791,7 @@ function AiBrainView() {
         <label><span>Responses API 地址</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
         <label><span>模型</span><input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-5.4-mini" /></label>
         <label><span>API Key</span><input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? "已保存；留空则继续使用" : "sk-…"} /></label>
-        <div className="brain-limits"><label><span>单来源最大步骤</span><input type="number" min="4" max="60" value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value))} /></label><label><span>单来源最大内容数</span><input type="number" min="1" max="30" value={maxItems} onChange={(event) => setMaxItems(Number(event.target.value))} /></label></div>
+        <div className="brain-limits"><label><span>单来源最大步骤</span><input type="number" min="4" max="120" value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value))} /></label><label><span>默认深读内容数</span><input type="number" min="1" max="50" value={maxItems} onChange={(event) => setMaxItems(Number(event.target.value))} /></label></div>
         <button className="primary-button brain-test-button" disabled={saving} onClick={() => void saveAndTest()}>{saving ? "正在连接并测试…" : connected ? "保存并重新测试" : "保存并测试 AI 中枢"}</button>
         {(message || settings?.lastError) && <div className={`brain-message ${connected ? "success" : ""}`}>{message || settings?.lastError}</div>}
       </section>
@@ -1024,6 +1035,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
   const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
   const [sources, setSources] = useState(task?.sources.filter((source) => ALL_SOURCES.includes(source)) ?? ["抖音", "微博", "EDA365"]);
+  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>(() => Object.fromEntries(ALL_SOURCES.map((source) => [source, Math.max(1, Math.min(50, Number(task?.sourceLimits?.[source] ?? 10)))])));
   const [schedule, setSchedule] = useState(task?.schedule ?? "每天 09:00");
   const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);
@@ -1064,7 +1076,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           action: task ? "updateTask" : "createTask",
           task: { id: task?.id, name, jd, status: task?.status ?? "active", sources, techKeywords: effectiveTechKeywords,
             companyKeywords: split(companies), signalKeywords: split(signals), excludeKeywords: split(excludes),
-            authorBlacklist: split(authorBlacklist), companyBlacklist: split(companyBlacklist), schedule, timeRange, scheduleEnabled: schedule !== "仅手动运行" },
+            authorBlacklist: split(authorBlacklist), companyBlacklist: split(companyBlacklist), sourceLimits, schedule, timeRange, scheduleEnabled: schedule !== "仅手动运行" },
         }),
       });
       const result = await response.json() as { error?: string };
@@ -1088,7 +1100,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} /></label>
           <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
           <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
-          <fieldset><legend>数据源</legend><div className="source-checks">{ALL_SOURCES.map((source) => <label key={source}><input type="checkbox" checked={sources.includes(source)} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span></label>)}</div></fieldset>
+          <fieldset className="source-depth-fieldset"><legend>每个平台深读多少条</legend><p>例如设置为10：系统会在该平台逐条打开10个内容详情，读完正文和评论后才结束。</p><div className="source-depth-grid">{ALL_SOURCES.map((source) => { const enabled = sources.includes(source); return <label className={enabled ? "enabled" : ""} key={source}><input type="checkbox" checked={enabled} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span><input aria-label={`${source}深读条数`} type="number" min="1" max="50" disabled={!enabled} value={sourceLimits[source]} onChange={(event) => setSourceLimits((current) => ({ ...current, [source]: Math.max(1, Math.min(50, Number(event.target.value) || 1)) }))} /><em>条</em></label>; })}</div></fieldset>
           {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>

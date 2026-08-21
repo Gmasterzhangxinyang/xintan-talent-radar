@@ -41,7 +41,18 @@ export async function ingestCandidates(db: D1Database, task: TaskRecord, items: 
     const hash = await contentHash(task.id, item.source, item.snippet, item.url);
     const duplicate = await db.prepare("SELECT id FROM raw_items WHERE task_id = ? AND content_hash = ?").bind(task.id, hash).first();
     if (duplicate) { stats.deduped += 1; continue; }
-    const analysis = analyzeCandidate(item.snippet, { tech, companies, signals });
+    const fallbackAnalysis = analyzeCandidate(item.snippet, { tech, companies, signals });
+    const raw = item.raw && typeof item.raw === "object" ? item.raw as Record<string, unknown> : {};
+    const ai = raw.aiAnalysis && typeof raw.aiAnalysis === "object" ? raw.aiAnalysis as Record<string, unknown> : null;
+    const analysis = ai ? {
+      tags: Array.isArray(ai.tags) ? ai.tags.map(String).slice(0, 8) : fallbackAnalysis.tags,
+      intent: ["强", "中", "无"].includes(String(ai.intent)) ? String(ai.intent) : fallbackAnalysis.intent,
+      intelligenceType: ["人才线索", "企业情报"].includes(String(ai.intelligenceType)) ? String(ai.intelligenceType) : fallbackAnalysis.intelligenceType,
+      priority: ["A", "B", "C"].includes(String(ai.priority)) ? String(ai.priority) : fallbackAnalysis.priority,
+      score: Math.max(0, Math.min(100, Number(ai.score ?? fallbackAnalysis.score))),
+      companyNote: String(ai.companyNote ?? fallbackAnalysis.companyNote).slice(0, 1_000),
+      evidence: String(ai.evidence ?? fallbackAnalysis.evidence).slice(0, 2_000),
+    } : fallbackAnalysis;
     const now = new Date().toISOString();
     const publishedAt = item.publishedAt ?? "未公开";
     const rawId = `raw-${crypto.randomUUID()}`;
@@ -74,6 +85,7 @@ type LocalAgentJob = {
   currentItem?: unknown;
   analysisTrace?: unknown[];
   liveViewUrl?: string;
+  targetItems?: number;
 };
 
 export async function runTask(
@@ -83,7 +95,7 @@ export async function runTask(
   localJobs: Record<string, LocalAgentJob> = {},
   localCandidates: CandidateItem[] = [],
 ) {
-  const task = await db.prepare("SELECT * FROM tasks WHERE id = ?").bind(taskId).first<TaskRecord>();
+  const task = await db.prepare("SELECT t.*, f.source_limits FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id WHERE t.id = ?").bind(taskId).first<TaskRecord>();
   if (!task) throw new Error("任务不存在");
   if (task.status !== "active") throw new Error("任务已暂停，请先恢复任务");
   const runId = `run-${crypto.randomUUID()}`;
@@ -100,7 +112,7 @@ export async function runTask(
       if (localJob) {
         const jobId = String(localJob.jobId ?? `local-${crypto.randomUUID()}`).slice(0, 160);
         const waitingLogin = localJob.status === "waiting_login";
-        const persistedStatus = waitingLogin ? "waiting_login" : localJob.status === "failed" ? "failed" : localJob.status === "completed" ? "completed" : "dispatched";
+        const persistedStatus = waitingLogin ? "waiting_login" : localJob.status === "failed" ? "failed" : localJob.status === "partial" ? "partial" : localJob.status === "completed" ? "completed" : "dispatched";
         const liveViewUrl = String(localJob.liveViewUrl ?? "").startsWith("http://127.0.0.1:8765/") ? String(localJob.liveViewUrl) : "";
         const action = String(localJob.currentAction ?? `已在${source}打开关键词检索`).slice(0, 300);
         await db.prepare(`INSERT OR REPLACE INTO connector_jobs
@@ -113,7 +125,7 @@ export async function runTask(
         if (sourceCandidates.length) {
           const stats = await ingestCandidates(db, task, sourceCandidates);
           for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];
-          messages.push(`${source}:获取${stats.fetched}/新增${stats.valid}`);
+          messages.push(persistedStatus === "partial" ? `${source}:仅深读${localJob.inspected ?? 0}/${localJob.targetItems ?? 0}条(${action})` : `${source}:获取${stats.fetched}/新增${stats.valid}`);
         } else if (persistedStatus === "failed") {
           messages.push(`${source}:失败(${action})`);
         } else {

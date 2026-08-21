@@ -85,6 +85,7 @@ export const taskFilters = sqliteTable("task_filters", {
   taskId: text("task_id").primaryKey(),
   authorBlacklist: text("author_blacklist").notNull().default("[]"),
   companyBlacklist: text("company_blacklist").notNull().default("[]"),
+  sourceLimits: text("source_limits").notNull().default("{}"),
   scheduleEnabled: integer("schedule_enabled").notNull().default(1),
   nextRunAt: text("next_run_at"),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),

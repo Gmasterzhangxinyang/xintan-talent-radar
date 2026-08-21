@@ -103,13 +103,17 @@ function responseOutputText(payload) {
 async function askAiBrain(observation) {
   if (!aiSettings.apiKey || aiSettings.status !== "connected") throw new Error("AI中枢尚未配置并通过连接测试");
   const endpoint = `${String(aiSettings.baseUrl).replace(/\/$/, "")}/responses`;
+  const visualFrames = Array.isArray(observation.visualFrames) ? observation.visualFrames.slice(0, 2) : [];
+  const textObservation = { ...observation };
+  delete textObservation.visualFrames;
+  const inputContent = [{ type: "input_text", text: JSON.stringify(textObservation) }, ...visualFrames.map((imageUrl) => ({ type: "input_image", image_url: imageUrl }))];
   const response = await fetch(endpoint, {
     method: "POST", signal: AbortSignal.timeout(45_000),
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${aiSettings.apiKey}` },
     body: JSON.stringify({
       model: aiSettings.model, store: false, max_output_tokens: 900,
       instructions: `你是芯片设计行业猎头情报Agent的中央决策大脑。只分析公开或已授权内容。每个候选都已经由电脑Agent打开站内详情并读取可见正文与公开评论，你必须基于详情证据判断，不能只复述列表摘要。evidenceQuotes应给出1至5条简短原文证据；若证据不足则明确指出。你只能从给定的安全动作中选择下一步，绝不能私信、发布、点赞、关注、上传、下载、输入密码/验证码、绕过验证或离开平台白名单域名。输出简短可审计的决策摘要，不输出隐藏思维链。`,
-      input: [{ role: "user", content: [{ type: "input_text", text: JSON.stringify(observation) }] }],
+      input: [{ role: "user", content: inputContent }],
       text: { format: { type: "json_schema", name: "talent_agent_decision", strict: true, schema: AI_DECISION_SCHEMA } },
     }),
   });
@@ -332,6 +336,55 @@ async function verifyPlatform(platform) {
   }
 }
 
+async function extractPublicMetadata(page, fallbackAuthor) {
+  const candidates = await page.locator("[data-e2e*='author'], [data-e2e*='user'], [class*='author'], [class*='nickname'], [class*='user-name'], a[href*='/user/'], a[href*='/people/'], a[href*='/profile/']").evaluateAll((elements) => elements.map((element) => ({
+    text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
+    href: element instanceof HTMLAnchorElement ? element.href : String(element.closest("a")?.href || ""),
+  })).filter((item) => item.text.length >= 2 && item.text.length <= 80).slice(0, 20)).catch(() => []);
+  const authorCandidate = candidates[0];
+  let authorId = "";
+  try { authorId = new URL(authorCandidate?.href || "").pathname.split("/").filter(Boolean).at(-1) || ""; } catch { /* not exposed */ }
+  const timeTexts = await page.locator("time, [datetime], [class*='time'], [class*='date'], [data-e2e*='time']").evaluateAll((elements) => elements.map((element) => String(element.getAttribute("datetime") || element.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20)).catch(() => []);
+  const bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+  const timePattern = /(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?|\d{1,2}[-/.月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?|\d+\s*(?:分钟前|小时前|天前))/;
+  const publishedAt = timeTexts.find((value) => timePattern.test(value))?.match(timePattern)?.[0] || bodyText.match(timePattern)?.[0] || "未公开";
+  return { author: authorCandidate?.text || fallbackAuthor || "公开用户", authorId, publishedAt };
+}
+
+async function readCommentsProgressively(page, { job, position, target, pendingTrace, results, analysisTrace }) {
+  const comments = [];
+  const seen = new Set();
+  for (let round = 0; round < 8 && comments.length < target; round += 1) {
+    const visible = await page.locator("[class*='comment'], [id*='comment'], [aria-label*='评论'], [data-e2e*='comment']").evaluateAll((elements, roundIndex) => elements.map((element, index) => {
+      const text = String(element.innerText || "").replace(/\s+/g, " ").trim();
+      const marker = `xt-comment-${roundIndex}-${index}`;
+      element.setAttribute("data-xintan-comment", marker);
+      return { marker, text };
+    }).filter((item) => item.text.length >= 8), round).catch(() => []);
+    let added = 0;
+    for (const comment of visible) {
+      const key = comment.text.slice(0, 260);
+      if (seen.has(key)) continue;
+      seen.add(key); comments.push(comment.text.slice(0, 600)); added += 1;
+      await page.locator(`[data-xintan-comment="${comment.marker}"]`).first().scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
+      searchJobs.set(job.jobId, {
+        ...job, status: "running", phase: "reading_comments", fetched: results.length,
+        inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
+        currentAction: `第 ${position}/${job.targetItems} 条：逐条阅读公开评论 ${comments.length}/${target}`,
+        currentItem: { ...pendingTrace, status: "reading_comments", commentRead: comments.length, commentTarget: target, commentPreview: comment.text.slice(0, 180), reason: "正在逐条阅读评论，尚未形成最终结论" },
+        analysisTrace: [...analysisTrace],
+      });
+      await page.waitForTimeout(220);
+      if (comments.length >= target) break;
+    }
+    if (comments.length >= target) break;
+    await page.mouse.wheel(0, 520).catch(() => undefined);
+    await page.waitForTimeout(added ? 650 : 900);
+    if (!added && round >= 2) break;
+  }
+  return comments;
+}
+
 async function processSearchJob(job, queries) {
   try {
     const page = await openControlledPage(job.searchUrl);
@@ -343,13 +396,13 @@ async function processSearchJob(job, queries) {
     const seenSnippets = new Set();
     const results = [];
     const analysisTrace = [];
-    const maxItems = Math.max(1, Math.min(30, Number(aiSettings.policy.maxItemsPerSource ?? 12)));
+    const maxItems = Math.max(1, Math.min(50, Number(job.targetItems ?? aiSettings.policy.maxItemsPerSource ?? 10)));
     let agentSteps = 0;
     let refinements = 0;
     let stopRequested = false;
     let pendingRefine = "";
     let anchorCount = 0;
-    for (let screen = 0; screen < 3 && analysisTrace.length < maxItems && agentSteps < aiSettings.policy.maxStepsPerSource; screen += 1) {
+    for (let screen = 0; screen < 12 && analysisTrace.length < maxItems && agentSteps < Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2); screen += 1) {
       const batch = await page.locator("a[href]").evaluateAll((elements, screenIndex) => elements.map((element, index) => {
         const anchor = element;
         const container = anchor.closest("article, li, [role='listitem'], .pbw, [class*='note-item'], [class*='search-result'], [class*='feed-card']") || anchor;
@@ -374,7 +427,7 @@ async function processSearchJob(job, queries) {
         seenSnippets.add(candidate.snippet.replace(/\s+/g, " ").trim().slice(0, 240));
         const item = { ...candidate, platform: job.platform, snippet: candidate.snippet.slice(0, 800) };
         const position = analysisTrace.length + 1;
-        const projectedTotal = Math.min(maxItems, analysisTrace.length + candidates.length);
+        const projectedTotal = maxItems;
         const pendingTrace = { index: position, url: parsed.toString(), snippet: item.snippet, author: candidate.title.slice(0, 60) || "公开用户", status: "opening_detail", decision: "待判断", reason: "电脑Agent正在打开详情并读取正文", tags: [], matchedKeywords: [], evidenceQuotes: [], detailExcerpt: "", intent: "无", intelligenceType: "待判断", score: 0, priority: "C", nextAction: "open_source", actionReason: "每条候选必须进入详情深读", confidence: 0, policyStatus: "正在校验站内详情地址", model: aiSettings.model };
         searchJobs.set(job.jobId, {
           ...job, status: "running", phase: "opening_detail", progress: Math.min(88, 26 + position * 5), fetched: results.length,
@@ -386,26 +439,40 @@ async function processSearchJob(job, queries) {
         const detailPolicy = enforceAgentPolicy({ nextAction: "open_source", decision: "needs_more" }, job, item);
         if (!detailPolicy.allowed) throw new Error(`详情打开被安全策略阻止：${detailPolicy.reason}`);
         const searchPageUrl = page.url();
+        const searchScrollY = await page.evaluate(() => window.scrollY).catch(() => 0);
         await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-        await page.waitForTimeout(1400);
+        await page.waitForTimeout(job.platform === "抖音" ? 2200 : 1400);
         const landedUrl = page.url();
         const landedHost = new URL(landedUrl).hostname.replace(/^www\./, "");
         if (!landedHost.endsWith(expectedHost)) throw new Error("详情页跳转超出平台白名单域名");
         const detailText = (await page.locator("body").innerText({ timeout: 6000 }).catch(() => "")).replace(/\s+/g, " ").trim();
-        const commentTexts = await page.locator("[class*='comment'], [id*='comment'], [aria-label*='评论']").evaluateAll((elements) => elements.map((element) => String(element.innerText || "").replace(/\s+/g, " ").trim()).filter((text) => text.length >= 8).slice(0, 20)).catch(() => []);
+        const publicMeta = await extractPublicMetadata(page, pendingTrace.author);
+        const metadataTrace = { ...pendingTrace, author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt };
+        const visualFrames = [];
+        const firstFrame = await page.screenshot({ type: "jpeg", quality: 45 }).catch(() => null);
+        if (firstFrame) visualFrames.push(`data:image/jpeg;base64,${firstFrame.toString("base64")}`);
+        const hasVideo = await page.locator("video").count().then((count) => count > 0).catch(() => false);
+        if (hasVideo) {
+          await page.locator("video").first().evaluate((video) => video.play().catch(() => undefined)).catch(() => undefined);
+          await page.waitForTimeout(1800);
+          const secondFrame = await page.screenshot({ type: "jpeg", quality: 45 }).catch(() => null);
+          if (secondFrame) visualFrames.push(`data:image/jpeg;base64,${secondFrame.toString("base64")}`);
+        }
+        const commentTexts = await readCommentsProgressively(page, { job: { ...job, targetItems: maxItems }, position, target: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), pendingTrace: metadataTrace, results, analysisTrace });
         const detailExcerpt = detailText.slice(0, 520);
-        const readingTrace = { ...pendingTrace, status: "reading_detail", reason: "正在提取正文、公开评论和可回溯证据", detailExcerpt, policyStatus: "站内详情地址校验通过" };
+        const readingTrace = { ...metadataTrace, status: "reading_detail", reason: "正在提取正文、公开评论和可回溯证据", detailExcerpt, policyStatus: "站内详情地址校验通过" };
         searchJobs.set(job.jobId, {
           ...job, status: "running", phase: "reading_detail", progress: Math.min(90, 28 + position * 5), fetched: results.length,
           inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
-          currentAction: `正在深读第 ${position} 条详情：正文 ${detailText.length} 字，公开评论 ${commentTexts.length} 条`,
+          currentAction: `第 ${position}/${maxItems} 条深读完成：${hasVideo ? `观察视频画面 ${visualFrames.length} 帧，` : ""}正文 ${detailText.length} 字，逐条阅读评论 ${commentTexts.length} 条`,
           currentItem: readingTrace, analysisTrace: [...analysisTrace, readingTrace],
         });
         await showItemAnalysis(page, { ...item, marker: "" }, { decision: "深读详情", priority: "-", score: 0, reason: `正文 ${detailText.length} 字 · 公开评论 ${commentTexts.length} 条 · 随后交给AI判断`, keep: true }, position, projectedTotal, "detail");
         const brainDecision = await askAiBrain({
           task: { name: job.taskName ?? "猎头情报任务", techKeywords: job.techKeywords, companyKeywords: job.companyKeywords, signalKeywords: job.signalKeywords, excludeKeywords: job.excludeKeywords, timeRange: job.timeRange },
-          platform: job.platform, pageUrl: landedUrl, candidate: { author: pendingTrace.author, listSnippet: item.snippet, url: item.url },
-          mandatoryDeepRead: { visibleDetail: detailText.slice(0, 5000), publicComments: commentTexts.join("\n").slice(0, 2400), detailCharacters: detailText.length, publicCommentBlocks: commentTexts.length },
+          platform: job.platform, pageUrl: landedUrl, candidate: { author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt, listSnippet: item.snippet, url: item.url },
+          mandatoryDeepRead: { contentKind: hasVideo ? "视频" : "图文", visibleDetail: detailText.slice(0, 5000), publicComments: commentTexts.join("\n").slice(0, 4000), detailCharacters: detailText.length, publicCommentBlocks: commentTexts.length, visualFrameCount: visualFrames.length },
+          visualFrames,
           progress: { item: position, inspected: analysisTrace.length, kept: results.length },
           safeActions: ["keep", "filter", "refine_search", "scroll_next", "cross_check", "stop"],
           instruction: "这是已打开的详情页。必须引用详情证据给出最终判断；不要再次要求打开原文或读取评论。",
@@ -415,6 +482,7 @@ async function processSearchJob(job, queries) {
         if (["open_source", "read_comments"].includes(policy.action)) policy = { ...policy, action: "scroll_next", reason: `${policy.reason}；详情与公开评论已完成强制读取` };
         const executedAction = `打开详情 → 读取正文${commentTexts.length ? `与${commentTexts.length}条公开评论` : "（未检测到公开评论）"} → ${policy.action}`;
         await page.goto(searchPageUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+        await page.evaluate((scrollY) => window.scrollTo(0, scrollY), searchScrollY).catch(() => undefined);
         await page.waitForTimeout(700);
         const keep = brainDecision.decision === "keep";
         const exploring = brainDecision.decision === "needs_more" && ["refine_search", "cross_check", "scroll_next"].includes(policy.action);
@@ -425,13 +493,15 @@ async function processSearchJob(job, queries) {
           reasoningSummary: brainDecision.reasoningSummary, nextAction: executedAction, actionReason: brainDecision.actionReason,
           confidence: brainDecision.confidence, stopReason: brainDecision.stopReason, policyStatus: policy.reason,
           model: brainDecision.model, responseId: brainDecision.responseId, evidenceQuotes: brainDecision.evidenceQuotes, detailExcerpt,
+          commentRead: commentTexts.length, commentTarget: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), contentKind: hasVideo ? "视频" : "图文",
         };
-        const finishedTrace = { ...pendingTrace, ...analysis, status: "completed" };
+        const finishedTrace = { ...metadataTrace, ...analysis, status: "completed" };
         analysisTrace.push(finishedTrace);
         if (analysis.keep) {
           results.push({
             source: job.platform, externalId: parsed.toString(), url: parsed.toString(),
-            author: candidate.title.slice(0, 60) || "公开用户", authorId: "", publishedAt: "未公开", snippet: item.snippet,
+            author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt, snippet: detailExcerpt || item.snippet,
+            raw: { aiAnalysis: { tags: brainDecision.tags, intent: brainDecision.intent, intelligenceType: brainDecision.intelligenceType, priority: brainDecision.priority, score: brainDecision.score, companyNote: brainDecision.reasoningSummary, evidence: brainDecision.evidenceQuotes.join("；"), confidence: brainDecision.confidence } },
           });
         }
         searchJobs.set(job.jobId, {
@@ -450,7 +520,7 @@ async function processSearchJob(job, queries) {
         }
         if (policy.action === "stop") { stopRequested = true; break; }
       }
-      if (stopRequested || analysisTrace.length >= maxItems || agentSteps >= aiSettings.policy.maxStepsPerSource) break;
+      if (stopRequested || analysisTrace.length >= maxItems || agentSteps >= Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2)) break;
       if (pendingRefine) {
         const refinedUrl = searchUrl(job.platform, [pendingRefine]);
         await page.goto(refinedUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
@@ -465,11 +535,14 @@ async function processSearchJob(job, queries) {
     }
     const title = await page.title().catch(() => "");
     const needsLogin = /登录|sign in|login/i.test(`${title} ${page.url()}`) && results.length === 0;
+    const targetReached = analysisTrace.length >= maxItems;
+    const finalStatus = needsLogin ? "waiting_login" : targetReached ? "completed" : "partial";
     searchJobs.set(job.jobId, {
-      ...job, status: needsLogin ? "waiting_login" : "completed", phase: needsLogin ? "waiting_login" : "completed", progress: 100,
+      ...job, status: finalStatus, phase: needsLogin ? "waiting_login" : targetReached ? "completed" : "partial", progress: 100,
       fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, results, analysisTrace,
       currentItem: analysisTrace.at(-1),
-      currentAction: needsLogin ? `${job.platform}需要登录后继续` : `${job.platform}分析完成：检查 ${analysisTrace.length} 条，保留 ${results.length} 条，过滤 ${analysisTrace.length - results.length} 条`,
+      targetItems: maxItems,
+      currentAction: needsLogin ? `${job.platform}需要登录后继续` : targetReached ? `${job.platform}已按要求逐条深读 ${analysisTrace.length}/${maxItems} 条，保留 ${results.length} 条` : `${job.platform}仅完成 ${analysisTrace.length}/${maxItems} 条：当前检索页没有更多可打开内容，请调整关键词或登录状态`,
       diagnostic: results.length ? undefined : { pageUrl: page.url(), pageTitle: title, anchorCount },
       completedAt: new Date().toISOString(),
     });
@@ -538,9 +611,9 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "0.7.2",
+      version: "0.8.1",
       operatorWindow: "direct",
-      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
+      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "policy_guard", "agent_loop", "per_source_targets", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {
@@ -558,8 +631,8 @@ const server = http.createServer(async (request, response) => {
         model: String(payload.model ?? aiSettings.model).trim().slice(0, 120), apiKey: String(payload.apiKey ?? "").trim() || aiSettings.apiKey,
         status: "untested", lastError: "",
         policy: {
-          maxStepsPerSource: Math.max(4, Math.min(60, Number(incomingPolicy.maxStepsPerSource ?? aiSettings.policy.maxStepsPerSource))),
-          maxItemsPerSource: Math.max(1, Math.min(30, Number(incomingPolicy.maxItemsPerSource ?? aiSettings.policy.maxItemsPerSource))),
+          maxStepsPerSource: Math.max(4, Math.min(120, Number(incomingPolicy.maxStepsPerSource ?? aiSettings.policy.maxStepsPerSource))),
+          maxItemsPerSource: Math.max(1, Math.min(50, Number(incomingPolicy.maxItemsPerSource ?? aiSettings.policy.maxItemsPerSource))),
           allowOpenDetail: incomingPolicy.allowOpenDetail !== false, allowReadComments: incomingPolicy.allowReadComments !== false,
           allowRefineSearch: incomingPolicy.allowRefineSearch !== false, allowCrossPlatformSuggestion: incomingPolicy.allowCrossPlatformSuggestion !== false,
         },
@@ -649,6 +722,7 @@ const server = http.createServer(async (request, response) => {
         currentAction: needsLogin ? `已打开${platform}，等待你完成登录` : `已在${platform}打开关键词检索`,
         liveViewUrl: "", searchUrl: destination, createdAt: new Date().toISOString(),
         taskName: String(payload.taskName ?? "猎头情报任务"), timeRange: String(payload.timeRange ?? "近30天"), queries,
+        targetItems: Math.max(1, Math.min(50, Number(payload.targetItems ?? 10))), commentTarget: Math.max(1, Math.min(50, Number(payload.commentTarget ?? 20))),
         techKeywords: Array.isArray(payload.techKeywords) ? payload.techKeywords.map(String) : queries,
         companyKeywords: Array.isArray(payload.companyKeywords) ? payload.companyKeywords.map(String) : [],
         signalKeywords: Array.isArray(payload.signalKeywords) ? payload.signalKeywords.map(String) : [],
