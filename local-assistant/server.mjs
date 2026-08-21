@@ -1,6 +1,4 @@
 import http from "node:http";
-import { execFile } from "node:child_process";
-import { readFile, unlink } from "node:fs/promises";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -24,6 +22,7 @@ const PLATFORM_URLS = {
 const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
 const searchJobs = new Map();
 const verificationQueries = ["芯片", "设计"];
+let operationQueue = Promise.resolve();
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
 const BROWSER_PROFILE_DIR = resolve(PROJECT_DIR, "work", "browser-profile");
@@ -40,6 +39,7 @@ try {
 } catch { /* first launch */ }
 let browserContext;
 let browserConnection;
+let operatorPage;
 
 function saveSessions() {
   writeFileSync(SESSION_FILE, JSON.stringify({ profile: "xintan-dedicated-v1", sessions: sessionStates, verifications: verificationStates }, null, 2));
@@ -59,7 +59,7 @@ async function ensureBrowser() {
     executablePath: CHROME_PATH,
     headless: false,
     viewport: null,
-    args: ["--start-maximized", "--remote-debugging-port=9222", "--disable-blink-features=AutomationControlled"],
+    args: ["--window-size=760,620", "--window-position=80,70", "--remote-debugging-port=9222", "--disable-blink-features=AutomationControlled"],
   });
   browserContext.on("close", () => { browserContext = undefined; });
   return browserContext;
@@ -67,8 +67,15 @@ async function ensureBrowser() {
 
 async function openControlledPage(target) {
   const context = await ensureBrowser();
-  const page = await context.newPage();
+  const page = operatorPage && !operatorPage.isClosed() ? operatorPage : await context.newPage();
+  operatorPage = page;
   await page.goto(target, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
+  try {
+    const session = await context.newCDPSession(page);
+    const { windowId } = await session.send("Browser.getWindowForTarget");
+    await session.send("Browser.setWindowBounds", { windowId, bounds: { left: 80, top: 70, width: 760, height: 620, windowState: "normal" } });
+    await session.detach();
+  } catch { /* window is still usable when resizing is unavailable */ }
   await page.bringToFront();
   return page;
 }
@@ -164,14 +171,14 @@ async function verifyPlatform(platform) {
     record("link", "来源链接", sourceLinks.length > 0, sourceLinks.length ? `识别 ${sourceLinks.length} 个站内来源链接` : "没有识别到可回溯链接");
 
     const passed = checks.every((check) => check.status === "passed");
-    const result = { platform, status: passed ? "passed" : "failed", checks, testedAt: new Date().toISOString(), startedAt, pageUrl: page.url(), liveViewUrl: `http://${HOST}:${PORT}/live` };
+    const result = { platform, status: passed ? "passed" : "failed", checks, testedAt: new Date().toISOString(), startedAt, pageUrl: page.url() };
     verificationStates[platform] = result;
     saveSessions();
     return result;
   } catch (error) {
     const result = {
       platform, status: "failed", checks, testedAt: new Date().toISOString(), startedAt,
-      error: error instanceof Error ? error.message : "功能验收失败", liveViewUrl: `http://${HOST}:${PORT}/live`,
+      error: error instanceof Error ? error.message : "功能验收失败",
     };
     verificationStates[platform] = result;
     saveSessions();
@@ -272,24 +279,6 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function captureScreen(response) {
-  const target = `/private/tmp/xintan-assistant-screen-${process.pid}.jpg`;
-  execFile("/usr/sbin/screencapture", ["-x", "-t", "jpg", target], async (error) => {
-    if (error) return json(response, 503, { error: "请在系统设置中允许屏幕录制权限" });
-    try {
-      const image = await readFile(target);
-      response.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-store" });
-      response.end(image);
-    } catch {
-      json(response, 503, { error: "请在系统设置中允许屏幕录制权限" });
-    } finally {
-      await unlink(target).catch(() => undefined);
-    }
-  });
-}
-
-const livePage = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>芯探电脑实时画面</title><style>html,body{margin:0;height:100%;background:#0c0d11;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;overflow:hidden}img{width:100%;height:100%;object-fit:contain}.tip{position:fixed;left:16px;top:14px;padding:7px 10px;border-radius:7px;background:#17181dcc;color:#b8b9ff}</style></head><body><main><div class="tip">芯探 · 当前电脑实时画面</div><img id="screen" alt="当前电脑画面"></main><script>const el=document.getElementById('screen');function next(){const image=new Image();image.onload=()=>{el.src=image.src;setTimeout(next,500)};image.onerror=()=>setTimeout(next,1200);image.src='/screen.jpg?t='+Date.now()}next()</script></body></html>`;
-
 const server = http.createServer(async (request, response) => {
   allowBrowser(request, response);
   if (request.method === "OPTIONS") return response.writeHead(204).end();
@@ -299,8 +288,8 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      liveViewUrl: `http://${HOST}:${PORT}/live`,
-      capabilities: ["open_platform", "screen_capture", "browser_sessions", "search_tasks", "source_verifications"],
+      operatorWindow: "direct",
+      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/browser-sessions") {
@@ -312,6 +301,12 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/v1/connectivity") {
     const sources = await Promise.all(Object.entries(PLATFORM_URLS).map(([name, target]) => probeSource(name, target)));
     return json(response, 200, { checkedAt: new Date().toISOString(), sources });
+  }
+  if (request.method === "POST" && url.pathname === "/v1/operator-window/open") {
+    try {
+      const page = await openControlledPage(PLATFORM_URLS["知乎"]);
+      return json(response, 200, { ok: true, pageUrl: page.url(), message: "已打开芯探操作窗口" });
+    } catch { return json(response, 500, { error: "无法打开芯探操作窗口" }); }
   }
   if (request.method === "POST" && url.pathname === "/v1/browser-sessions/open") {
     try {
@@ -362,10 +357,11 @@ const server = http.createServer(async (request, response) => {
       const job = {
         jobId, platform, status: needsLogin ? "waiting_login" : "running", progress: 10,
         currentAction: needsLogin ? `已打开${platform}，等待你完成登录` : `已在${platform}打开关键词检索`,
-        liveViewUrl: `http://${HOST}:${PORT}/live`, searchUrl: destination, createdAt: new Date().toISOString(),
+        liveViewUrl: "", searchUrl: destination, createdAt: new Date().toISOString(),
       };
       searchJobs.set(jobId, job);
-      void processSearchJob(job, queries);
+      operationQueue = operationQueue.then(() => processSearchJob(job, queries));
+      void operationQueue;
       return json(response, 202, job);
     } catch {
       return json(response, 400, { error: "任务格式不正确" });
@@ -382,11 +378,6 @@ const server = http.createServer(async (request, response) => {
     const job = searchJobs.get(jobId);
     if (job) searchJobs.set(jobId, { ...job, status: "cancelled", currentAction: "任务已取消" });
     return json(response, 200, { ok: true });
-  }
-  if (request.method === "GET" && url.pathname === "/screen.jpg") return captureScreen(response);
-  if (request.method === "GET" && url.pathname === "/live") {
-    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-    return response.end(livePage);
   }
   return json(response, 404, { error: "Not found" });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type View = "overview" | "tasks" | "leads" | "runs" | "sources";
 
@@ -244,14 +244,14 @@ export default function Home() {
           setRunProgress(15 + Math.round(((index + 1) / task.sources.length) * 45));
         }
         const terminal = new Set(["completed", "failed", "waiting_login", "cancelled"]);
-        for (let attempt = 0; attempt < 24; attempt += 1) {
+        for (let attempt = 0; attempt < 90; attempt += 1) {
           const updates = await Promise.all(Object.entries(localJobs).map(async ([source, job]) => {
             const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks/${encodeURIComponent(job.jobId)}`, { cache: "no-store" });
             return [source, response.ok ? await response.json() as LocalJob : job] as const;
           }));
           for (const [source, job] of updates) localJobs[source] = job;
           localCandidates = updates.flatMap(([, job]) => Array.isArray(job.results) ? job.results : []);
-          setRunProgress(62 + Math.round(((attempt + 1) / 24) * 24));
+          setRunProgress(62 + Math.round(((attempt + 1) / 90) * 24));
           if (updates.every(([, job]) => terminal.has(job.status))) break;
           await new Promise((resolve) => window.setTimeout(resolve, 1_200));
         }
@@ -692,6 +692,16 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
     finally { setTesting(false); }
   }
 
+  async function showOperatorWindow() {
+    setSessionMessage("正在打开独立操作窗口…");
+    try {
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/operator-window/open`, { method: "POST" });
+      const result = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "操作窗口打开失败");
+      setSessionMessage(result.message ?? "已打开芯探操作窗口；AI 的点击、输入和滚动会直接发生在该窗口中");
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : "操作窗口打开失败"); }
+  }
+
   async function openPlatform(platform: string) {
     setOpeningPlatform(platform); setSessionMessage("");
     try {
@@ -747,7 +757,7 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
         <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/6 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
-        <div className="pair-actions">{settings.liveViewUrl && <a href={settings.liveViewUrl} target="_blank" rel="noreferrer" className="ghost-button live-view-button">查看实时画面</a>}<button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "重新连接"}</button></div>
+        <div className="pair-actions">{settings.status === "connected" && <button className="ghost-button live-view-button" onClick={() => void showOperatorWindow()}>打开操作小窗</button>}<button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "重新连接"}</button></div>
       </div>
       <div className="source-center-head"><div><b>6 Sources</b><span>网络连通与账号状态</span></div><small>账号数据仅保留在本机</small></div>
       <div className="source-connection-grid">
@@ -785,24 +795,26 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   const waitingJobs = localConnected ? 0 : latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)
     && !job.currentAction.includes("ProcessSingleton") && !job.currentAction.includes("Failed to create"));
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const [heartbeatClock, setHeartbeatClock] = useState(0);
-  const lastHeartbeat = liveJob?.updatedAt ? Date.parse(liveJob.updatedAt) : 0;
-  const streamStale = Boolean(liveJob && liveJob.status === "running" && lastHeartbeat && heartbeatClock && heartbeatClock - lastHeartbeat > 20_000);
+  const [openingOperator, setOpeningOperator] = useState(false);
   useEffect(() => {
-    const timer = window.setInterval(() => { setHeartbeatClock(new Date().getTime()); void onChanged(); }, 5_000);
+    const timer = window.setInterval(() => { void onChanged(); }, 5_000);
     return () => window.clearInterval(timer);
   }, [onChanged]);
+  async function showOperatorWindow() {
+    setOpeningOperator(true);
+    try { await fetch(`${LOCAL_ASSISTANT_URL}/v1/operator-window/open`, { method: "POST" }); }
+    finally { setOpeningOperator(false); }
+  }
   return (
     <section>
       <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>六个平台独立配置；配置完成后自动验收查找、滚动、内容读取和来源链接。</p></div></div>
       <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
-        <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
-        {liveJob ? <div className="live-console-body">
-          <div className={`browser-stage ${streamStale ? "stream-stale" : ""}`} ref={stageRef}>{liveJob.liveViewUrl ? <iframe src={liveJob.liveViewUrl} title={`${liveJob.source} 电脑实时同屏`} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allow="fullscreen; autoplay" allowFullScreen /> : <div className="screen-placeholder blocked"><span>SCREEN REQUIRED</span><strong>实时同屏未建立，任务已暂停</strong><p>电脑助手建立实时画面后，鼠标、点击、输入、滚动和页面跳转才会在这里同步显示。</p></div>}{streamStale && <div className="stream-alert"><strong>画面心跳已中断</strong><span>电脑助手已暂停操作，恢复画面后才能继续。</span></div>}</div>
-          <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}{liveJob.liveViewUrl && <a href={liveJob.liveViewUrl} target="_blank" rel="noreferrer" className="live-link">在新窗口观看电脑操作 ↗</a>}</div>
-        </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "任务没有派发，也没有操作你的电脑。启动并连接本地助手后才能运行。" : "运行包含社媒平台的任务后，电脑画面会显示在这里。"}</span></div>}
+        <div className="live-console-head"><div><p className="eyebrow">DIRECT BROWSER OPERATION</p><h3>独立操作窗口</h3><span>无需录屏。任务会直接打开一个小型浏览器窗口，AI 的搜索、点击、输入和滚动都在里面真实发生。</span></div><div className="live-controls"><button disabled={openingOperator || !localConnected} onClick={() => void showOperatorWindow()}>{openingOperator ? "正在打开…" : "唤起操作窗口"}</button>{liveJob && <span className={`job-state ${liveJob.status}`}>{liveJob.status === "running" ? "正在操作" : liveJob.status === "waiting_login" ? "等待登录" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
+        {liveJob ? <div className="operator-console-body">
+          <div className="operator-window-note"><span>VISIBLE BROWSER</span><strong>{liveJob.source} 操作窗口已打开</strong><p>你看到的就是 AI 正在控制的真实网页，不是截图或录屏转播。</p></div>
+          <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}</div>
+        </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "启动本机助手后，任务会自动打开独立操作窗口。" : "运行任务后会自动弹出一个小型浏览器窗口，你可以直接观察全部操作。"}</span></div>}
       </section>
       <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始六条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>
