@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type View = "overview" | "tasks" | "leads" | "runs" | "sources" | "ai";
+type View = "overview" | "tasks" | "leads" | "settings";
 
 type Task = {
   id: string;
@@ -129,12 +129,10 @@ const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EDA365"];
 const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
-  { id: "overview", label: "情报概览", icon: "OV" },
+  { id: "overview", label: "工作台", icon: "HM" },
   { id: "tasks", label: "检索任务", icon: "TS" },
-  { id: "leads", label: "线索工作台", icon: "LD" },
-  { id: "runs", label: "运行日志", icon: "RN" },
-  { id: "sources", label: "数据源", icon: "DS" },
-  { id: "ai", label: "AI中枢", icon: "AI" },
+  { id: "leads", label: "线索结果", icon: "LD" },
+  { id: "settings", label: "设置", icon: "ST" },
 ];
 
 function initials(name: string) {
@@ -195,7 +193,7 @@ export default function Home() {
   function enterSourceSetup() {
     window.sessionStorage.setItem("xintan-source-setup-complete", "1");
     setShowStartupSetup(false);
-    setView("sources");
+    setView("settings");
     setToast("请按需逐个配置数据源");
   }
 
@@ -236,7 +234,7 @@ export default function Home() {
         const brainResponse = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings`, { cache: "no-store" });
         const brain = await brainResponse.json() as Partial<AiBrainSettings>;
         if (!brainResponse.ok || brain.status !== "connected") {
-          setView("ai");
+          setView("settings");
           throw new Error("请先在AI中枢配置模型并通过连接测试");
         }
         if (requiresComputer) {
@@ -250,7 +248,7 @@ export default function Home() {
                 method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
               });
             }
-            setView("sources");
+            setView("settings");
             throw new Error(`已打开 ${missingLogins.join("、")} 登录页；请完成登录并在数据源页确认后再运行`);
           }
         }
@@ -409,7 +407,6 @@ export default function Home() {
               <span>⌕</span>
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
             </label>
-            <button className="ghost-button" onClick={() => { setStartupSetupStep("ready"); setStartupSetupError(""); setShowStartupSetup(true); }}>配置数据源</button>
             <button className="primary-button" onClick={() => { setEditingTask(null); setShowTaskModal(true); }}>＋ 新建任务</button>
           </div>
         </header>
@@ -450,9 +447,7 @@ export default function Home() {
               onExport={exportExcel}
             />
           )}
-          {view === "runs" && <RunsView runs={data.runs} />}
-          {view === "sources" && <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} onChanged={loadState} />}
-          {view === "ai" && <AiBrainView />}
+          {view === "settings" && <SettingsView data={data} onChanged={loadState} />}
         </div>
       </section>
 
@@ -521,7 +516,7 @@ function Overview({
         </div>
         <div className="overview-status">
           <button onClick={() => onNavigate("tasks")}><span>Active tasks</span><strong>{activeTasks}</strong><small>持续运行的检索任务</small></button>
-          <button onClick={() => onNavigate("sources")}><span>Sources</span><strong>{data.sources.length}</strong><small>已配置，实时状态在连接页</small></button>
+          <button onClick={() => onNavigate("settings")}><span>Sources</span><strong>{data.sources.length}</strong><small>数据源与AI统一在设置中管理</small></button>
           <button onClick={() => onNavigate("leads")}><span>Review queue</span><strong>{pendingLeads}</strong><small>等待人工确认的线索</small></button>
         </div>
       </section>
@@ -548,7 +543,7 @@ function Overview({
         </div>
 
         <div className="panel source-panel">
-          <div className="panel-head"><div><p className="eyebrow">SOURCE COVERAGE</p><h3>覆盖来源</h3></div><button className="text-button" onClick={() => onNavigate("sources")}>检测连接 →</button></div>
+          <div className="panel-head"><div><p className="eyebrow">SOURCE COVERAGE</p><h3>覆盖来源</h3></div><button className="text-button" onClick={() => onNavigate("settings")}>打开设置 →</button></div>
           <div className="source-mini-grid">
             {data.sources.map((source) => (
               <div className="source-mini" key={source.id}>
@@ -796,6 +791,21 @@ function AiBrainView() {
       </section>
     </div>
     <section className="agent-loop-card"><p className="eyebrow">CONTROLLED AGENT LOOP</p>{[["01","观察","读取当前可见原文与上下文"],["02","思考","AI输出决策摘要和下一步动作"],["03","校验","策略层检查域名、动作和步骤上限"],["04","行动","电脑执行搜索、打开、滚动或返回"],["05","回传","记录结果并让AI决定继续或停止"]].map(([index,title,copy]) => <div key={index}><i>{index}</i><span><b>{title}</b><small>{copy}</small></span></div>)}</section>
+  </section>;
+}
+
+function SettingsView({ data, onChanged }: { data: AppState; onChanged: () => Promise<void> }) {
+  const [section, setSection] = useState<"sources" | "ai">("sources");
+  return <section className="settings-hub">
+    <div className="settings-hub-head">
+      <div><p className="eyebrow">SYSTEM SETUP</p><h2>一次设置，持续运行</h2><span>先登录需要的平台，再连接 AI 中枢；其余高级信息默认收起。</span></div>
+      <div className="settings-hub-tabs" role="tablist" aria-label="设置分类">
+        <button className={section === "sources" ? "active" : ""} role="tab" aria-selected={section === "sources"} onClick={() => setSection("sources")}>数据源</button>
+        <button className={section === "ai" ? "active" : ""} role="tab" aria-selected={section === "ai"} onClick={() => setSection("ai")}>AI 中枢</button>
+      </div>
+    </div>
+    {section === "sources" ? <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} onChanged={onChanged} /> : <AiBrainView />}
+    <details className="settings-audit-details"><summary>查看运行记录与技术日志</summary><RunsView runs={data.runs} /></details>
   </section>;
 }
 
@@ -1097,10 +1107,10 @@ function StartupSetupModal({ onConfigure, onClose }: { onConfigure: () => void; 
         <h2 id="startup-setup-title">按需配置数据源</h2>
         <p>每个平台都可以单独打开和登录。完成配置后，芯探会自动测试查找、滚动、内容读取和来源链接。</p>
         <div className="startup-source-row">{ALL_SOURCES.map((source) => <span key={source}>{initials(source)}<small>{source}</small></span>)}</div>
-        <div className="startup-hint"><b>不必一次配置全部</b><span>进入“数据源”后，选择当前需要的平台逐个配置即可。</span></div>
+        <div className="startup-hint"><b>不必一次配置全部</b><span>进入“设置”后，选择当前需要的平台逐个配置即可。</span></div>
         <div className="startup-actions">
           <button className="ghost-button" onClick={onClose}>稍后配置</button>
-          <button className="primary-button" onClick={onConfigure}>进入数据源配置</button>
+          <button className="primary-button" onClick={onConfigure}>进入设置</button>
         </div>
       </section>
     </div>
@@ -1116,7 +1126,7 @@ function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; on
           <p className="guide-intro">不用先研究所有菜单。创建一个任务、运行一次检索、审核一条线索，就能理解完整工作流。</p>
           <div className="guide-journey">
             <article><span>01</span><div><h3>粘贴客户 JD</h3><p>系统自动识别职位、技术栈、目标企业、求职信号和排除词，你只需检查结果。</p><button onClick={onCreate}>创建检索任务 →</button></div></article>
-            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；电脑助手会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("sources")}>检查电脑与登录状态 →</button></div></article>
+            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；电脑助手会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("settings")}>打开设置 →</button></div></article>
             <article><span>03</span><div><h3>人工复核高价值线索</h3><p>优先看 A 级线索，核对公开原文、作者和来源链接，再标记确认或误报。</p><button onClick={() => onNavigate("leads")}>打开线索工作台 →</button></div></article>
           </div>
           <div className="guide-terms"><b>三个概念</b><span><strong>任务</strong>＝一套持续运行的检索条件</span><span><strong>线索</strong>＝经过过滤和分析的公开内容</span><span><strong>运行日志</strong>＝每次获取、过滤、去重的审计记录</span></div>
