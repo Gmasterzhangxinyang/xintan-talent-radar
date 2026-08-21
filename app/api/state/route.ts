@@ -91,6 +91,8 @@ function normalizeConnectorJob(row: Record<string, unknown>) {
     fetched: row.fetched, error: row.error, progress: row.progress,
     currentAction: row.current_action, liveViewUrl: row.live_view_url,
     screenshotUrl: row.screenshot_url, updatedAt: row.updated_at,
+    phase: row.phase, inspected: row.inspected, kept: row.kept, filtered: row.filtered,
+    currentItem: parseJson(row.current_item, null), analysisTrace: parseJson(row.analysis_trace, []),
   };
 }
 
@@ -165,7 +167,7 @@ export async function POST(request: Request) {
       const taskId = String(payload.taskId ?? "");
       const origin = new URL(request.url).origin;
       const localJobs = payload.localJobs && typeof payload.localJobs === "object"
-        ? payload.localJobs as Record<string, { jobId?: string; status?: string; progress?: number; fetched?: number; currentAction?: string; liveViewUrl?: string }>
+        ? payload.localJobs as Record<string, { jobId?: string; status?: string; phase?: string; progress?: number; fetched?: number; inspected?: number; kept?: number; filtered?: number; currentAction?: string; currentItem?: unknown; analysisTrace?: unknown[]; liveViewUrl?: string }>
         : {};
       const localCandidates = Array.isArray(payload.localCandidates) ? payload.localCandidates.slice(0, 300).map((item) => {
         const candidate = item && typeof item === "object" ? item as Record<string, unknown> : {};

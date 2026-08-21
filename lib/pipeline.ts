@@ -67,6 +67,12 @@ type LocalAgentJob = {
   progress?: number;
   fetched?: number;
   currentAction?: string;
+  phase?: string;
+  inspected?: number;
+  kept?: number;
+  filtered?: number;
+  currentItem?: unknown;
+  analysisTrace?: unknown[];
   liveViewUrl?: string;
 };
 
@@ -98,10 +104,12 @@ export async function runTask(
         const liveViewUrl = String(localJob.liveViewUrl ?? "").startsWith("http://127.0.0.1:8765/") ? String(localJob.liveViewUrl) : "";
         const action = String(localJob.currentAction ?? `已在${source}打开关键词检索`).slice(0, 300);
         await db.prepare(`INSERT OR REPLACE INTO connector_jobs
-          (id, task_id, source, status, dispatched_at, fetched, progress, current_action, live_view_url, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          (id, task_id, source, status, dispatched_at, fetched, progress, current_action, phase, inspected, kept, filtered, current_item, analysis_trace, live_view_url, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(jobId, task.id, source, persistedStatus, startedAt,
-            Math.max(0, Number(localJob.fetched ?? sourceCandidates.length)), Math.max(0, Math.min(100, Number(localJob.progress ?? 10))), action, liveViewUrl, startedAt).run();
+            Math.max(0, Number(localJob.fetched ?? sourceCandidates.length)), Math.max(0, Math.min(100, Number(localJob.progress ?? 10))), action,
+            String(localJob.phase ?? "").slice(0, 40), Math.max(0, Number(localJob.inspected ?? 0)), Math.max(0, Number(localJob.kept ?? sourceCandidates.length)),
+            Math.max(0, Number(localJob.filtered ?? 0)), JSON.stringify(localJob.currentItem ?? {}), JSON.stringify((localJob.analysisTrace ?? []).slice(-40)), liveViewUrl, startedAt).run();
         if (sourceCandidates.length) {
           const stats = await ingestCandidates(db, task, sourceCandidates);
           for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];

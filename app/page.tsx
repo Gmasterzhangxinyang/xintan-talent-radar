@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type View = "overview" | "tasks" | "leads" | "runs" | "sources";
+type View = "overview" | "tasks" | "leads" | "runs" | "sources" | "ai";
 
 type Task = {
   id: string;
@@ -69,6 +69,22 @@ type Source = {
   note: string;
 };
 
+type AnalysisTraceItem = {
+  index: number; url: string; snippet: string; author: string; status: string;
+  decision: "保留" | "过滤" | "继续探索"; reason: string; tags: string[]; matchedKeywords: string[];
+  excludeMatches: string[]; intent: string; intelligenceType: string; score: number; priority: string;
+  reasoningSummary?: string; nextAction?: string; actionReason?: string; confidence?: number;
+  policyStatus?: string; model?: string; stopReason?: string;
+};
+
+type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string };
+
+type LocalJob = {
+  jobId: string; platform?: string; status: string; phase?: string; progress: number; fetched: number;
+  inspected?: number; kept?: number; filtered?: number; currentAction: string; liveViewUrl: string;
+  currentItem?: AnalysisTraceItem; analysisTrace?: AnalysisTraceItem[]; results?: LocalResult[];
+};
+
 type AppState = {
   tasks: Task[];
   leads: Lead[];
@@ -77,7 +93,9 @@ type AppState = {
   connectorJobs?: Array<{
     id: string; taskId: string; source: string; status: string; dispatchedAt: string;
     fetched: number; error: string; progress: number; currentAction: string;
-    liveViewUrl: string; screenshotUrl: string; updatedAt?: string;
+    liveViewUrl: string; screenshotUrl: string; updatedAt?: string; phase?: string;
+    inspected?: number; kept?: number; filtered?: number; currentItem?: AnalysisTraceItem;
+    analysisTrace?: AnalysisTraceItem[];
   }>;
 };
 
@@ -100,6 +118,12 @@ type SourceVerification = {
   checks: Array<{ key: string; label: string; status: "passed" | "failed"; detail: string }>;
 };
 
+type AiBrainSettings = {
+  provider: string; baseUrl: string; model: string; hasApiKey: boolean; status: string;
+  lastTestAt: string; lastError: string; allowedActions: string[]; blockedActions: string[];
+  policy: { maxStepsPerSource: number; maxItemsPerSource: number; allowOpenDetail: boolean; allowReadComments: boolean; allowRefineSearch: boolean; allowCrossPlatformSuggestion: boolean };
+};
+
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EDA365"];
 const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
@@ -110,6 +134,7 @@ const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
   { id: "leads", label: "线索工作台", icon: "LD" },
   { id: "runs", label: "运行日志", icon: "RN" },
   { id: "sources", label: "数据源", icon: "DS" },
+  { id: "ai", label: "AI中枢", icon: "AI" },
 ];
 
 function initials(name: string) {
@@ -133,6 +158,7 @@ export default function Home() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [runningTask, setRunningTask] = useState<string | null>(null);
   const [runProgress, setRunProgress] = useState(0);
+  const [liveJobs, setLiveJobs] = useState<Record<string, LocalJob>>({});
   const [toast, setToast] = useState("");
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("全部来源");
@@ -199,15 +225,20 @@ export default function Home() {
     if (runningTask) return;
     setRunningTask(task.id);
     setRunProgress(8);
+    setLiveJobs({});
     try {
-      type LocalResult = { source: string; externalId: string; author: string; authorId: string; publishedAt: string; snippet: string; url: string };
-      type LocalJob = { jobId: string; status: string; progress: number; fetched: number; currentAction: string; liveViewUrl: string; results?: LocalResult[] };
       const localJobs: Record<string, LocalJob> = {};
       let localCandidates: LocalResult[] = [];
       const requiresComputer = task.sources.some((source) => SOCIAL_SOURCES.includes(source));
       try {
         const health = await fetch(`${LOCAL_ASSISTANT_URL}/health`, { cache: "no-store" });
         if (!health.ok) throw new Error("本机助手未启动");
+        const brainResponse = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings`, { cache: "no-store" });
+        const brain = await brainResponse.json() as Partial<AiBrainSettings>;
+        if (!brainResponse.ok || brain.status !== "connected") {
+          setView("ai");
+          throw new Error("请先在AI中枢配置模型并通过连接测试");
+        }
         if (requiresComputer) {
           const sessionResponse = await fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" });
           const sessionPayload = await sessionResponse.json() as { sessions?: BrowserSessionState[] };
@@ -230,7 +261,11 @@ export default function Home() {
           const dispatch = await fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobId, taskId: task.id, platform: source, queries, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange }),
+            body: JSON.stringify({
+              jobId, taskId: task.id, taskName: task.name, platform: source, queries,
+              techKeywords: task.techKeywords, companyKeywords: task.companyKeywords,
+              signalKeywords: task.signalKeywords, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange,
+            }),
           });
           const job = await dispatch.json() as Partial<LocalJob> & { error?: string };
           if (!dispatch.ok) throw new Error(job.error ?? `${source}无法打开`);
@@ -240,6 +275,7 @@ export default function Home() {
             currentAction: String(job.currentAction ?? `已在${source}打开关键词检索`),
             liveViewUrl: String(job.liveViewUrl ?? `${LOCAL_ASSISTANT_URL}/live`),
           };
+          setLiveJobs({ ...localJobs });
           setRunProgress(15 + Math.round(((index + 1) / task.sources.length) * 45));
         }
         const terminal = new Set(["completed", "failed", "waiting_login", "cancelled"]);
@@ -249,12 +285,14 @@ export default function Home() {
             return [source, response.ok ? await response.json() as LocalJob : job] as const;
           }));
           for (const [source, job] of updates) localJobs[source] = job;
+          setLiveJobs({ ...localJobs });
           localCandidates = updates.flatMap(([, job]) => Array.isArray(job.results) ? job.results : []);
           setRunProgress(62 + Math.round(((attempt + 1) / 90) * 24));
           if (updates.every(([, job]) => terminal.has(job.status))) break;
           await new Promise((resolve) => window.setTimeout(resolve, 1_200));
         }
       } catch (localError) {
+        if (localError instanceof Error && localError.message.includes("AI中枢")) throw localError;
         if (requiresComputer) throw localError instanceof Error ? localError : new Error("请先启动并登录芯探专用浏览器");
       }
       setRunProgress(90);
@@ -391,6 +429,7 @@ export default function Home() {
               tasks={data.tasks}
               runningTask={runningTask}
               runProgress={runProgress}
+              liveJobs={liveJobs}
               onRun={runSearchTask}
               onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
               onEdit={(task) => { setEditingTask(task); setShowTaskModal(true); }}
@@ -413,6 +452,7 @@ export default function Home() {
           )}
           {view === "runs" && <RunsView runs={data.runs} />}
           {view === "sources" && <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} onChanged={loadState} />}
+          {view === "ai" && <AiBrainView />}
         </div>
       </section>
 
@@ -528,10 +568,77 @@ function Metric({ label, value, delta, tone }: { label: string; value: string; d
   return <div className={`metric-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>{delta}</small></div>;
 }
 
-function TasksView({ tasks, runningTask, runProgress, onRun, onCreate, onEdit, onToggle, onDelete }: {
+function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; running: boolean }) {
+  const sources = Object.keys(jobs);
+  const activeSource = sources.find((source) => jobs[source].phase === "analyzing") ?? sources.find((source) => jobs[source].status === "running") ?? sources[0] ?? "";
+  const [selectedSource, setSelectedSource] = useState("");
+  const source = selectedSource && jobs[selectedSource] ? selectedSource : activeSource;
+  const job = jobs[source];
+  if (!job) return null;
+  const trace = job.analysisTrace ?? [];
+  const current = job.currentItem ?? trace.at(-1);
+  const phaseOrder = ["searching", "locating", "analyzing", "loading_more", "completed"];
+  const currentPhase = job.phase === "loading_more" ? "analyzing" : job.phase ?? "searching";
+  const phaseIndex = currentPhase === "waiting_login" ? 0 : Math.max(0, phaseOrder.indexOf(currentPhase));
+  return (
+    <section className="analysis-workspace" aria-live="polite">
+      <div className="analysis-head">
+        <div><p className="eyebrow">LIVE ANALYSIS AUDIT</p><h3>逐条分析，而不是只看滚动</h3><span>浏览器会停在当前内容；每个平台的命中词、判断依据和取舍都在这里同步显示。</span></div>
+        <div className={`analysis-running-state ${running ? "active" : "complete"}`}><i />{running ? "分析进行中" : "本轮分析记录"}</div>
+      </div>
+      <div className="analysis-source-tabs" role="tablist" aria-label="平台分析记录">
+        {sources.map((name) => {
+          const item = jobs[name];
+          return <button className={name === source ? "active" : ""} role="tab" aria-selected={name === source} key={name} onClick={() => setSelectedSource(name)}>
+            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "完成" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "analyzing" ? "逐条分析" : "准备中"}</small>
+          </button>;
+        })}
+      </div>
+      <div className="analysis-phase-row">
+        {["打开检索", "定位内容", "逐条判断", "形成线索"].map((label, index) => <div className={index <= Math.min(3, phaseIndex) ? "done" : ""} key={label}><i>{index < Math.min(3, phaseIndex) || job.status === "completed" ? "✓" : index + 1}</i><span>{label}</span></div>)}
+      </div>
+      <div className="analysis-summary">
+        <span><small>当前动作</small><strong>{job.currentAction}</strong></span>
+        <span><small>已检查</small><strong>{safeNumber(job.inspected)}</strong></span>
+        <span><small>保留</small><strong className="keep">{safeNumber(job.kept ?? job.fetched)}</strong></span>
+        <span><small>过滤</small><strong className="drop">{safeNumber(job.filtered)}</strong></span>
+      </div>
+      <div className="analysis-body">
+        <article className="current-analysis-card">
+          <div className="current-analysis-label"><span>{current?.status === "thinking" ? "AI THINKING" : "LATEST DECISION"}</span>{current && <em className={current.decision === "保留" ? "keep" : current.decision === "继续探索" ? "explore" : "drop"}>{current.decision}</em>}</div>
+          {current ? <>
+            <blockquote>{current.snippet}</blockquote>
+            <div className="analysis-keywords"><b>命中依据</b>{current.matchedKeywords.length ? current.matchedKeywords.map((keyword) => <span key={keyword}>{keyword}</span>) : <span className="muted">无任务关键词</span>}</div>
+            <dl>
+              <div><dt>内容类型</dt><dd>{current.intelligenceType}</dd></div>
+              <div><dt>求职意向</dt><dd>{current.intent}</dd></div>
+              <div><dt>价值等级</dt><dd>{current.priority} · {current.score}分</dd></div>
+              <div><dt>AI决策摘要</dt><dd>{current.reasoningSummary ?? current.reason}</dd></div>
+              <div><dt>下一步动作</dt><dd>{current.nextAction ?? "完成当前判断"} · {current.actionReason ?? ""}</dd></div>
+              <div><dt>安全策略</dt><dd>{current.policyStatus ?? "动作已限制在公开页面"}</dd></div>
+            </dl>
+            <a href={current.url} target="_blank" rel="noreferrer">打开当前原文 ↗</a>
+          </> : <div className="analysis-awaiting"><i /><strong>正在打开检索页</strong><span>{job.currentAction}</span></div>}
+        </article>
+        <div className="analysis-trace-list">
+          <div className="trace-list-head"><b>{source} 判断流水</b><span>{trace.length} 条</span></div>
+          <div className="trace-scroll">
+            {[...trace].reverse().map((item) => <a href={item.url} target="_blank" rel="noreferrer" className={`trace-item ${item.decision === "保留" ? "keep" : item.decision === "继续探索" ? "explore" : "drop"}`} key={`${item.index}-${item.url}`}>
+              <i>{item.index}</i><span><b>{item.decision} · {item.priority}级 · {item.score}分</b><small>{item.snippet}</small><em>{item.reason}</em></span>
+            </a>)}
+            {trace.length === 0 && <div className="trace-empty">页面打开后，会在这里逐条出现分析过程。</div>}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate, onEdit, onToggle, onDelete }: {
   tasks: Task[];
   runningTask: string | null;
   runProgress: number;
+  liveJobs: Record<string, LocalJob>;
   onRun: (task: Task) => void;
   onCreate: () => void;
   onEdit: (task: Task) => void;
@@ -541,6 +648,7 @@ function TasksView({ tasks, runningTask, runProgress, onRun, onCreate, onEdit, o
   return (
     <section>
       <div className="section-intro"><div><p className="eyebrow">SEARCH MISSIONS</p><h2>把每个JD变成持续运转的情报任务</h2><p>配置技术栈、目标企业、求职信号、时间范围和排除规则。</p></div><button className="primary-button" onClick={onCreate}>＋ 新建检索任务</button></div>
+      {(runningTask || Object.keys(liveJobs).length > 0) && <AnalysisWorkspace jobs={liveJobs} running={Boolean(runningTask)} />}
       <div className="task-grid">
         {tasks.map((task) => (
           <article className="task-card" key={task.id}>
@@ -619,6 +727,74 @@ function RunsView({ runs }: { runs: Run[] }) {
       </div>
     </section>
   );
+}
+
+function AiBrainView() {
+  const [settings, setSettings] = useState<AiBrainSettings | null>(null);
+  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+  const [model, setModel] = useState("gpt-5.4-mini");
+  const [apiKey, setApiKey] = useState("");
+  const [maxSteps, setMaxSteps] = useState(24);
+  const [maxItems, setMaxItems] = useState(12);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings`, { cache: "no-store" });
+      const value = await response.json() as AiBrainSettings;
+      if (!response.ok) throw new Error("本机助手未启动");
+      setSettings(value); setBaseUrl(value.baseUrl); setModel(value.model);
+      setMaxSteps(value.policy.maxStepsPerSource); setMaxItems(value.policy.maxItemsPerSource);
+    } catch { setMessage("请先启动芯探本机助手，再配置AI中枢"); }
+  }, []);
+  useEffect(() => {
+    // Initial synchronization with the device-local AI control plane.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
+  async function saveAndTest() {
+    setSaving(true); setMessage("正在保存，并让AI完成一次真实决策测试…");
+    try {
+      const save = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "openai", baseUrl, model, apiKey, policy: { maxStepsPerSource: maxSteps, maxItemsPerSource: maxItems, allowOpenDetail: true, allowReadComments: true, allowRefineSearch: true, allowCrossPlatformSuggestion: true } }),
+      });
+      const saved = await save.json() as AiBrainSettings & { error?: string };
+      if (!save.ok) throw new Error(saved.error ?? "配置保存失败");
+      setApiKey("");
+      const test = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings/test`, { method: "POST" });
+      const tested = await test.json() as AiBrainSettings & { error?: string; sampleDecision?: string };
+      if (!test.ok) throw new Error(tested.error ?? "AI连接测试失败");
+      setSettings(tested); setMessage(`AI中枢已连接，模型 ${tested.model} 已完成真实判断测试`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "AI中枢配置失败"); }
+    finally { setSaving(false); }
+  }
+  const connected = settings?.status === "connected";
+  return <section>
+    <div className="section-intro"><div><p className="eyebrow">AGENT CONTROL PLANE</p><h2>AI 中枢与行动边界</h2><p>模型负责评价页面内容并决定下一步；电脑 Agent 只执行经过策略校验的白名单动作。</p></div></div>
+    <section className="brain-hero">
+      <div className="brain-orbit"><span>AI</span><i className="orbit-one" /><i className="orbit-two" /></div>
+      <div><p className="eyebrow">CENTRAL REASONING ENGINE</p><h3>{connected ? "中央大脑已接管决策" : "先连接一个真正的AI大脑"}</h3><p>每条内容都会进入“观察 → AI判断 → 策略校验 → 电脑执行 → 结果回传”的 Agent 循环。关键词规则只做候选定位，不再冒充最终判断。</p></div>
+      <div className={`brain-status ${connected ? "connected" : "pending"}`}><i />{connected ? "READY" : settings?.status === "failed" ? "TEST FAILED" : "SETUP REQUIRED"}</div>
+    </section>
+    <div className="brain-grid">
+      <section className="brain-config-card">
+        <div className="brain-card-head"><div><p className="eyebrow">MODEL CONNECTION</p><h3>模型配置</h3></div><span>密钥仅保存在本机</span></div>
+        <label><span>Responses API 地址</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" /></label>
+        <label><span>模型</span><input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-5.4-mini" /></label>
+        <label><span>API Key</span><input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? "已保存；留空则继续使用" : "sk-…"} /></label>
+        <div className="brain-limits"><label><span>单来源最大步骤</span><input type="number" min="4" max="60" value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value))} /></label><label><span>单来源最大内容数</span><input type="number" min="1" max="30" value={maxItems} onChange={(event) => setMaxItems(Number(event.target.value))} /></label></div>
+        <button className="primary-button brain-test-button" disabled={saving} onClick={() => void saveAndTest()}>{saving ? "正在连接并测试…" : connected ? "保存并重新测试" : "保存并测试 AI 中枢"}</button>
+        {(message || settings?.lastError) && <div className={`brain-message ${connected ? "success" : ""}`}>{message || settings?.lastError}</div>}
+      </section>
+      <section className="brain-policy-card">
+        <div className="brain-card-head"><div><p className="eyebrow">ENFORCED POLICY</p><h3>电脑 Agent 规范</h3></div><span>默认拒绝越权</span></div>
+        <div className="policy-column allow"><b>允许自动执行</b>{(settings?.allowedActions ?? ["检索", "滚动", "读取公开内容", "打开站内原文", "读取公开评论", "调整关键词", "建议跨平台核验", "返回"]).map((action) => <span key={action}><i>✓</i>{action}</span>)}</div>
+        <div className="policy-column block"><b>禁止自动执行</b>{(settings?.blockedActions ?? ["私信", "评论或发布", "点赞关注", "上传下载", "输入密码或验证码", "绕过人机验证", "访问非白名单域名"]).map((action) => <span key={action}><i>×</i>{action}</span>)}</div>
+      </section>
+    </div>
+    <section className="agent-loop-card"><p className="eyebrow">CONTROLLED AGENT LOOP</p>{[["01","观察","读取当前可见原文与上下文"],["02","思考","AI输出决策摘要和下一步动作"],["03","校验","策略层检查域名、动作和步骤上限"],["04","行动","电脑执行搜索、打开、滚动或返回"],["05","回传","记录结果并让AI决定继续或停止"]].map(([index,title,copy]) => <div key={index}><i>{index}</i><span><b>{title}</b><small>{copy}</small></span></div>)}</section>
+  </section>;
 }
 
 const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
@@ -791,6 +967,11 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
 function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: NonNullable<AppState["connectorJobs"]>; onChanged: () => Promise<void> }) {
   const [localConnected, setLocalConnected] = useState(false);
   const latestJobs = jobs.filter((job, index) => jobs.findIndex((candidate) => candidate.taskId === job.taskId && candidate.source === job.source) === index);
+  const auditedJobs = Object.fromEntries(latestJobs.filter((job) => (job.analysisTrace?.length ?? 0) > 0).map((job) => [job.source, {
+    jobId: job.id, status: job.status, phase: job.phase, progress: job.progress, fetched: job.fetched,
+    inspected: job.inspected, kept: job.kept, filtered: job.filtered, currentAction: job.currentAction,
+    liveViewUrl: job.liveViewUrl, currentItem: job.currentItem, analysisTrace: job.analysisTrace,
+  } satisfies LocalJob]));
   const waitingJobs = localConnected ? 0 : latestJobs.filter((job) => job.status === "awaiting_config").length || sources.filter((source) => source.status.includes("待")).length;
   const liveJob = latestJobs.find((job) => ["running", "waiting_login", "dispatched"].includes(job.status)
     && !job.currentAction.includes("ProcessSingleton") && !job.currentAction.includes("Failed to create"));
@@ -815,6 +996,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
           <div className="job-telemetry"><span>{liveJob.source} · {new Date(liveJob.dispatchedAt).toLocaleString("zh-CN", { hour12: false })}</span><h4>{liveJob.currentAction || (liveJob.error ? "执行失败" : "等待电脑助手状态")}</h4><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, safeNumber(liveJob.progress)))}%` }} /></div><p>{safeNumber(liveJob.progress)}% · 已获取 {liveJob.fetched} 条</p>{liveJob.error && <div className="job-error">{liveJob.error}</div>}</div>
         </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "启动本机助手后，任务会自动打开独立操作窗口。" : "运行任务后会自动弹出一个小型浏览器窗口，你可以直接观察全部操作。"}</span></div>}
       </section>
+      {Object.keys(auditedJobs).length > 0 && <AnalysisWorkspace jobs={auditedJobs} running={false} />}
       <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始五条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
     </section>
   );

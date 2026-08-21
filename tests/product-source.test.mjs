@@ -44,3 +44,20 @@ test("implements the server-side collection pipeline", async () => {
     assert.match(source, new RegExp(capability));
   }
 });
+
+test("exposes a per-item analysis audit instead of blind scrolling", async () => {
+  const [page, assistant, schema, migration] = await Promise.all([
+    readFile(pagePath, "utf8"),
+    readFile(new URL("../local-assistant/server.mjs", import.meta.url), "utf8"),
+    readFile(schemaPath, "utf8"),
+    readFile(new URL("../drizzle/0006_analysis_audit.sql", import.meta.url), "utf8"),
+  ]);
+  for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
+    assert.match(page, new RegExp(capability));
+  }
+  for (const capability of ["askAiBrain", "enforceAgentPolicy", "showItemAnalysis", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
+    assert.match(assistant, new RegExp(capability));
+  }
+  assert.match(schema, /analysisTrace/);
+  assert.match(migration, /analysis_trace/);
+});

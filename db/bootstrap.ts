@@ -62,6 +62,9 @@ export async function ensureDatabase() {
       status TEXT NOT NULL, dispatched_at TEXT NOT NULL, completed_at TEXT,
       fetched INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
       progress INTEGER NOT NULL DEFAULT 0, current_action TEXT NOT NULL DEFAULT '',
+      phase TEXT NOT NULL DEFAULT '', inspected INTEGER NOT NULL DEFAULT 0,
+      kept INTEGER NOT NULL DEFAULT 0, filtered INTEGER NOT NULL DEFAULT 0,
+      current_item TEXT NOT NULL DEFAULT '{}', analysis_trace TEXT NOT NULL DEFAULT '[]',
       live_view_url TEXT NOT NULL DEFAULT '', screenshot_url TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
@@ -82,6 +85,12 @@ export async function ensureDatabase() {
   const missingConnectorColumns = [
     ["progress", "INTEGER NOT NULL DEFAULT 0"],
     ["current_action", "TEXT NOT NULL DEFAULT ''"],
+    ["phase", "TEXT NOT NULL DEFAULT ''"],
+    ["inspected", "INTEGER NOT NULL DEFAULT 0"],
+    ["kept", "INTEGER NOT NULL DEFAULT 0"],
+    ["filtered", "INTEGER NOT NULL DEFAULT 0"],
+    ["current_item", "TEXT NOT NULL DEFAULT '{}'"],
+    ["analysis_trace", "TEXT NOT NULL DEFAULT '[]'"],
     ["live_view_url", "TEXT NOT NULL DEFAULT ''"],
     ["screenshot_url", "TEXT NOT NULL DEFAULT ''"],
     ["updated_at", "TEXT NOT NULL DEFAULT ''"],
