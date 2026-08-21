@@ -23,21 +23,26 @@ const PLATFORM_URLS = {
 };
 const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
 const searchJobs = new Map();
+const verificationQueries = ["芯片", "设计"];
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
 const BROWSER_PROFILE_DIR = resolve(PROJECT_DIR, "work", "browser-profile");
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 mkdirSync(resolve(PROJECT_DIR, "work"), { recursive: true });
 let sessionStates = Object.fromEntries(SOCIAL_PLATFORMS.map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
+let verificationStates = {};
 try {
   const saved = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
-  if (saved?.profile === "xintan-dedicated-v1") sessionStates = { ...sessionStates, ...saved.sessions };
+  if (saved?.profile === "xintan-dedicated-v1") {
+    sessionStates = { ...sessionStates, ...saved.sessions };
+    verificationStates = saved.verifications ?? {};
+  }
 } catch { /* first launch */ }
 let browserContext;
 let browserConnection;
 
 function saveSessions() {
-  writeFileSync(SESSION_FILE, JSON.stringify({ profile: "xintan-dedicated-v1", sessions: sessionStates }, null, 2));
+  writeFileSync(SESSION_FILE, JSON.stringify({ profile: "xintan-dedicated-v1", sessions: sessionStates, verifications: verificationStates }, null, 2));
 }
 
 async function ensureBrowser() {
@@ -78,19 +83,106 @@ function searchUrl(platform, queries) {
   return PLATFORM_URLS[platform];
 }
 
+async function prepareSearchPage(page, platform, queries) {
+  if (SOCIAL_PLATFORMS.includes(platform)) return { performed: true, method: "direct_url" };
+  const forumSearchUrl = new URL("/search.php?mod=forum", PLATFORM_URLS[platform]).toString();
+  await page.goto(forumSearchUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+  let searchInput = page.locator("input#scform_srchtxt:visible, input#srchtxt:visible, input[name='srchtxt']:visible, input[name='keyword']:visible, input[type='search']:visible").first();
+  if (!(await searchInput.count())) {
+    const searchLink = page.locator("a[href*='search.php']:visible, a:has-text('搜索'):visible").first();
+    if (await searchLink.count()) {
+      await searchLink.click({ timeout: 5000 }).catch(() => undefined);
+      await page.waitForTimeout(1200);
+      searchInput = page.locator("input#scform_srchtxt:visible, input#srchtxt:visible, input[name='srchtxt']:visible, input[name='keyword']:visible, input[type='search']:visible").first();
+    }
+  }
+  if (await searchInput.count()) {
+    await searchInput.fill(queries.slice(0, 6).join(" "), { timeout: 5000 });
+    await searchInput.press("Enter", { timeout: 5000 });
+    await page.waitForTimeout(2500);
+    return { performed: true, method: "search_input" };
+  }
+  return { performed: false, method: "unavailable" };
+}
+
+async function verifyPlatform(platform) {
+  const startedAt = new Date().toISOString();
+  const checks = [];
+  const record = (key, label, passed, detail) => checks.push({ key, label, status: passed ? "passed" : "failed", detail });
+  try {
+    const destination = searchUrl(platform, verificationQueries);
+    const page = await openControlledPage(destination);
+    const searchAction = await prepareSearchPage(page, platform, verificationQueries);
+    await page.waitForTimeout(2200);
+
+    let bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    const pageTitle = await page.title().catch(() => "");
+    const pageUrl = page.url();
+    const accessGate = /人机验证|安全验证|访问验证|captcha|challenge/i.test(`${pageTitle} ${bodyText.slice(0, 2000)}`);
+    record("page", "网页打开", bodyText.trim().length > 30 && !pageUrl.startsWith("chrome-error://") && !accessGate, accessGate ? "页面进入人机或安全验证" : `${pageTitle || platform} · ${pageUrl}`);
+
+    const loginGate = /(?:passport|login|signin)/i.test(pageUrl) || /请先登录|登录后(?:继续|查看)|扫码登录/.test(bodyText.slice(0, 6000));
+    if (SOCIAL_PLATFORMS.includes(platform)) record("account", "账号会话", !loginGate, loginGate ? "页面仍要求登录" : "未发现登录拦截");
+
+    const joinedKeyword = verificationQueries.join(" ");
+    const searchDetected = SOCIAL_PLATFORMS.includes(platform)
+      ? searchAction.performed && pageUrl !== PLATFORM_URLS[platform] && (decodeURIComponent(pageUrl).includes(verificationQueries[0]) || bodyText.includes(verificationQueries[0]))
+      : searchAction.performed && (bodyText.includes(verificationQueries[0]) || bodyText.includes(joinedKeyword) || /search/i.test(pageUrl));
+    record("search", "关键词查找", searchDetected, searchDetected ? `已执行“${joinedKeyword}”检索` : "未确认检索结果页");
+
+    const beforeScroll = await page.evaluate(() => {
+      const root = document.scrollingElement;
+      const candidates = Array.from(document.querySelectorAll("*")).filter((element) => element.scrollHeight > element.clientHeight + 40);
+      const nested = candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
+      return { rootTop: root?.scrollTop ?? 0, rootMax: root ? root.scrollHeight - root.clientHeight : 0, nestedTop: nested?.scrollTop ?? 0, nestedMax: nested ? nested.scrollHeight - nested.clientHeight : 0 };
+    }).catch(() => ({ rootTop: 0, rootMax: 0, nestedTop: 0, nestedMax: 0 }));
+    await page.mouse.move(700, 500).catch(() => undefined);
+    await page.mouse.wheel(0, 1100).catch(() => undefined);
+    await page.waitForTimeout(1000);
+    const afterScroll = await page.evaluate(() => {
+      const root = document.scrollingElement;
+      const candidates = Array.from(document.querySelectorAll("*")).filter((element) => element.scrollHeight > element.clientHeight + 40);
+      const nested = candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
+      return { rootTop: root?.scrollTop ?? 0, rootMax: root ? root.scrollHeight - root.clientHeight : 0, nestedTop: nested?.scrollTop ?? 0, nestedMax: nested ? nested.scrollHeight - nested.clientHeight : 0 };
+    }).catch(() => ({ rootTop: 0, rootMax: 0, nestedTop: 0, nestedMax: 0 }));
+    const canScroll = beforeScroll.rootMax > 0 || beforeScroll.nestedMax > 0;
+    const didScroll = afterScroll.rootTop > beforeScroll.rootTop || afterScroll.nestedTop > beforeScroll.nestedTop;
+    record("scroll", "滚轮滚动", canScroll && didScroll, !canScroll ? "当前页面没有可滚动内容" : didScroll ? "页面已产生滚动位移" : "页面可滚动，但滚轮未产生位移");
+
+    bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => bodyText);
+    const anchors = await page.locator("a[href]").evaluateAll((elements) => elements.map((element) => ({
+      url: element.href,
+      text: String((element.closest("article, li, [role='listitem']") || element).innerText || "").replace(/\s+/g, " ").trim(),
+    }))).catch(() => []);
+    const readable = bodyText.replace(/\s+/g, " ").trim().length;
+    record("read", "内容读取", readable >= 80 && anchors.length > 0, `读取 ${readable} 个字符、${anchors.length} 个链接`);
+    const expectedHost = new URL(PLATFORM_URLS[platform]).hostname.replace(/^www\./, "");
+    const sourceLinks = anchors.filter((item) => {
+      try { return new URL(item.url).hostname.replace(/^www\./, "").endsWith(expectedHost) && item.text.length >= 4; }
+      catch { return false; }
+    });
+    record("link", "来源链接", sourceLinks.length > 0, sourceLinks.length ? `识别 ${sourceLinks.length} 个站内来源链接` : "没有识别到可回溯链接");
+
+    const passed = checks.every((check) => check.status === "passed");
+    const result = { platform, status: passed ? "passed" : "failed", checks, testedAt: new Date().toISOString(), startedAt, pageUrl: page.url(), liveViewUrl: `http://${HOST}:${PORT}/live` };
+    verificationStates[platform] = result;
+    saveSessions();
+    return result;
+  } catch (error) {
+    const result = {
+      platform, status: "failed", checks, testedAt: new Date().toISOString(), startedAt,
+      error: error instanceof Error ? error.message : "功能验收失败", liveViewUrl: `http://${HOST}:${PORT}/live`,
+    };
+    verificationStates[platform] = result;
+    saveSessions();
+    return result;
+  }
+}
+
 async function processSearchJob(job, queries) {
   try {
     const page = await openControlledPage(job.searchUrl);
-    if (!SOCIAL_PLATFORMS.includes(job.platform)) {
-      const forumSearchUrl = new URL("/search.php?mod=forum", PLATFORM_URLS[job.platform]).toString();
-      await page.goto(forumSearchUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-      const searchInput = page.locator("input[name='srchtxt'], input[name='keyword'], input[type='search'], input[type='text']").first();
-      if (await searchInput.count()) {
-        await searchInput.fill(queries.slice(0, 6).join(" "));
-        await searchInput.press("Enter");
-        await page.waitForTimeout(2500);
-      }
-    }
+    await prepareSearchPage(page, job.platform, queries);
     searchJobs.set(job.jobId, { ...job, status: "running", progress: 35, currentAction: `正在读取${job.platform}公开检索结果` });
     await page.waitForTimeout(2500);
     for (let index = 0; index < 3; index += 1) {
@@ -208,11 +300,14 @@ const server = http.createServer(async (request, response) => {
       ok: true,
       name: "芯探电脑助手",
       liveViewUrl: `http://${HOST}:${PORT}/live`,
-      capabilities: ["open_platform", "screen_capture", "browser_sessions", "search_tasks"],
+      capabilities: ["open_platform", "screen_capture", "browser_sessions", "search_tasks", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/browser-sessions") {
     return json(response, 200, { sessions: SOCIAL_PLATFORMS.map((platform) => ({ platform, ...sessionStates[platform], profileName: "芯探专用浏览器" })) });
+  }
+  if (request.method === "GET" && url.pathname === "/v1/source-verifications") {
+    return json(response, 200, { verifications: Object.values(verificationStates) });
   }
   if (request.method === "GET" && url.pathname === "/v1/connectivity") {
     const sources = await Promise.all(Object.entries(PLATFORM_URLS).map(([name, target]) => probeSource(name, target)));
@@ -242,6 +337,16 @@ const server = http.createServer(async (request, response) => {
       return json(response, 200, { ok: true, message: `${platform}已确认登录` });
     } catch {
       return json(response, 400, { error: "请求格式不正确" });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/v1/source-verifications") {
+    try {
+      const { platform } = await readJson(request);
+      if (!PLATFORM_URLS[String(platform)]) return json(response, 400, { error: "暂不支持该平台" });
+      const verification = await verifyPlatform(String(platform));
+      return json(response, verification.status === "passed" ? 200 : 422, { verification });
+    } catch {
+      return json(response, 400, { error: "功能验收请求格式不正确" });
     }
   }
   if (request.method === "POST" && url.pathname === "/v1/search-tasks") {

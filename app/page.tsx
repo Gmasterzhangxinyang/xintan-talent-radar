@@ -95,6 +95,11 @@ type SourceConnectivity = {
   name: string; reachable: boolean; status: string; httpStatus: number; checkedAt: string; detail: string;
 };
 
+type SourceVerification = {
+  platform: string; status: "passed" | "failed"; testedAt: string; pageUrl?: string; error?: string;
+  checks: Array<{ key: string; label: string; status: "passed" | "failed"; detail: string }>;
+};
+
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["抖音", "微博", "小红书", "知乎", "EETOP", "EDA365"];
 const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
@@ -631,22 +636,26 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
   const [openingPlatform, setOpeningPlatform] = useState("");
   const [sessionMessage, setSessionMessage] = useState("");
   const [connectivity, setConnectivity] = useState<SourceConnectivity[]>([]);
+  const [verifications, setVerifications] = useState<SourceVerification[]>([]);
   const [checkingSources, setCheckingSources] = useState(false);
   const [checkingPlatform, setCheckingPlatform] = useState("");
 
   const refreshSources = useCallback(async () => {
     setCheckingSources(true); setSessionMessage("");
     try {
-      const [connectivityResponse, sessionResponse] = await Promise.all([
+      const [connectivityResponse, sessionResponse, verificationResponse] = await Promise.all([
         fetch(`${LOCAL_ASSISTANT_URL}/v1/connectivity`, { cache: "no-store" }),
         fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" }),
+        fetch(`${LOCAL_ASSISTANT_URL}/v1/source-verifications`, { cache: "no-store" }),
       ]);
       const connectivityResult = await connectivityResponse.json() as { sources?: SourceConnectivity[]; error?: string };
       const sessionResult = await sessionResponse.json() as { sessions?: BrowserSessionState[]; error?: string };
+      const verificationResult = await verificationResponse.json() as { verifications?: SourceVerification[]; error?: string };
       if (!connectivityResponse.ok) throw new Error(connectivityResult.error ?? "数据源检测失败");
       if (!sessionResponse.ok) throw new Error(sessionResult.error ?? "登录状态检测失败");
       setConnectivity(connectivityResult.sources ?? []);
       setSessions(sessionResult.sessions ?? []);
+      if (verificationResponse.ok) setVerifications(verificationResult.verifications ?? []);
       setSessionMessage("六个数据源已完成检测");
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "数据源检测失败"); }
     finally { setCheckingSources(false); }
@@ -693,7 +702,8 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
         setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "browser_open", lastCheckedAt: new Date().toISOString() } : item));
         setSessionMessage(`${result.message ?? `已通知电脑打开${platform}`}；登录完成后请返回点击“确认已登录”`);
       } else {
-        setSessionMessage(result.message ?? `已在浏览器打开${platform}`);
+        setSessionMessage(`${result.message ?? `已在浏览器打开${platform}`}，正在自动验收查找、滚动和读取功能…`);
+        await runVerification(platform);
       }
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "无法打开平台"); }
     finally { setOpeningPlatform(""); }
@@ -706,26 +716,26 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(result.error ?? "确认失败");
       setSessions((current) => current.map((item) => item.platform === platform ? { ...item, status: "logged_in", lastCheckedAt: new Date().toISOString() } : item));
-      setSessionMessage(result.message ?? `${platform}已确认登录`);
+      setSessionMessage(`${result.message ?? `${platform}已确认登录`}，正在自动验收查找、滚动和读取功能…`);
+      await runVerification(platform);
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "确认失败"); }
     finally { setOpeningPlatform(""); }
   }
 
-  async function checkPlatform(platform: string) {
+  async function runVerification(platform: string) {
     setCheckingPlatform(platform); setSessionMessage("");
     try {
-      const [connectivityResponse, sessionResponse] = await Promise.all([
-        fetch(`${LOCAL_ASSISTANT_URL}/v1/connectivity`, { cache: "no-store" }),
-        fetch(`${LOCAL_ASSISTANT_URL}/v1/browser-sessions`, { cache: "no-store" }),
-      ]);
-      const connectivityResult = await connectivityResponse.json() as { sources?: SourceConnectivity[]; error?: string };
-      const sessionResult = await sessionResponse.json() as { sessions?: BrowserSessionState[]; error?: string };
-      if (!connectivityResponse.ok) throw new Error(connectivityResult.error ?? `${platform}检测失败`);
-      setConnectivity(connectivityResult.sources ?? []);
-      if (sessionResponse.ok) setSessions(sessionResult.sessions ?? []);
-      const sourceResult = connectivityResult.sources?.find((item) => item.name === platform);
-      setSessionMessage(sourceResult?.reachable ? `${platform}连接正常` : `${platform}暂时无法连接${sourceResult?.detail ? `：${sourceResult.detail}` : ""}`);
-    } catch (error) { setSessionMessage(error instanceof Error ? error.message : `${platform}检测失败`); }
+      const response = await fetch(`${LOCAL_ASSISTANT_URL}/v1/source-verifications`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ platform }),
+      });
+      const result = await response.json() as { verification?: SourceVerification; error?: string };
+      if (!result.verification) throw new Error(result.error ?? `${platform}功能验收失败`);
+      setVerifications((current) => [...current.filter((item) => item.platform !== platform), result.verification!]);
+      const failed = result.verification.checks.filter((check) => check.status === "failed").map((check) => check.label);
+      setSessionMessage(result.verification.status === "passed"
+        ? `${platform}功能验收通过：网页、查找、滚动、内容读取和来源链接均正常`
+        : `${platform}验收未通过：${failed.join("、") || result.verification.error || "请查看浏览器页面"}`);
+    } catch (error) { setSessionMessage(error instanceof Error ? error.message : `${platform}功能验收失败`); }
     finally { setCheckingPlatform(""); }
   }
 
@@ -745,17 +755,22 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
           const check = connectivity.find((item) => item.name === source.name);
           const isSocial = SOCIAL_SOURCES.includes(source.name);
           const session = sessions.find((item) => item.platform === source.name);
+          const verification = verifications.find((item) => item.platform === source.name);
           const waitingConfirmation = session?.status === "browser_open";
-          const label = !check ? (checkingSources ? "检测中" : "待检测") : !check.reachable ? "连接失败" : isSocial && session?.status === "logged_in" ? "已登录" : waitingConfirmation ? "待确认" : isSocial ? "可访问" : check.status === "restricted" ? "浏览器可达" : "已连通";
-          const tone = label === "已登录" || label === "已连通" || label === "浏览器可达" ? "ready" : label === "连接失败" ? "failed" : "pending";
+          const label = checkingPlatform === source.name ? "验收中" : verification?.status === "passed" ? "功能正常" : verification?.status === "failed" ? "验收失败" : !check ? (checkingSources ? "检测中" : "待检测") : !check.reachable ? "连接失败" : waitingConfirmation ? "待确认" : isSocial && session?.status === "logged_in" ? "待验收" : isSocial ? "可访问" : check.status === "restricted" ? "浏览器可达" : "已连通";
+          const tone = label === "功能正常" || label === "已连通" || label === "浏览器可达" ? "ready" : label === "连接失败" || label === "验收失败" ? "failed" : "pending";
           return <article className="source-connection" key={source.id}>
             <span className="source-logo large">{initials(source.name)}</span>
             <div className="source-connection-copy"><b>{source.name}</b><span>{check?.detail ?? source.coverage}</span></div>
             <em className={tone}>{label}</em>
             <div className="source-card-actions">
-              <button disabled={settings.status !== "connected" || checkingPlatform === source.name} onClick={() => void checkPlatform(source.name)}>{checkingPlatform === source.name ? "检测中…" : "检测"}</button>
-              <button disabled={settings.status !== "connected" || openingPlatform === source.name} onClick={() => void (isSocial && waitingConfirmation ? confirmPlatform(source.name) : openPlatform(source.name))}>{openingPlatform === source.name ? "处理中…" : isSocial && waitingConfirmation ? "确认登录" : isSocial && session?.status !== "logged_in" ? "配置" : "重新配置"}</button>
+              <button disabled={settings.status !== "connected" || checkingPlatform === source.name} onClick={() => void runVerification(source.name)}>{checkingPlatform === source.name ? "验收中…" : "功能验收"}</button>
+              <button disabled={settings.status !== "connected" || openingPlatform === source.name || checkingPlatform === source.name} onClick={() => void (isSocial && waitingConfirmation ? confirmPlatform(source.name) : openPlatform(source.name))}>{openingPlatform === source.name ? "处理中…" : isSocial && waitingConfirmation ? "确认并验收" : verification ? "重新配置" : "配置"}</button>
             </div>
+            {verification && <div className="source-verification" aria-label={`${source.name}功能验收结果`}>
+              {verification.checks.map((item) => <span className={item.status} key={item.key} title={item.detail}><i>{item.status === "passed" ? "✓" : "!"}</i>{item.label}</span>)}
+              <small>{new Date(verification.testedAt).toLocaleString("zh-CN", { hour12: false })}</small>
+            </div>}
           </article>;
         })}
       </div>
@@ -780,7 +795,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }, [onChanged]);
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>六个平台独立配置、独立检测；需要登录的平台直接在本机浏览器完成。</p></div></div>
+      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>六个平台独立配置；配置完成后自动验收查找、滚动、内容读取和来源链接。</p></div></div>
       <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">MANDATORY SCREEN MIRROR</p><h3>电脑实时同屏</h3><span>电脑看见什么，这里就同步看见什么；画面中断时任务必须暂停。</span></div><div className="live-controls">{liveJob?.liveViewUrl && <button onClick={() => void stageRef.current?.requestFullscreen()}>全屏观看</button>}{liveJob && <span className={`job-state ${streamStale ? "failed" : liveJob.status}`}>{streamStale ? "画面心跳中断" : liveJob.status === "running" ? "实时执行中" : liveJob.status === "waiting_login" ? "等待人工登录" : liveJob.status === "completed" ? "已完成" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
@@ -885,7 +900,7 @@ function StartupSetupModal({ onConfigure, onClose }: { onConfigure: () => void; 
         <div className="startup-icon"><span>XT</span><i /></div>
         <p className="eyebrow">SOURCE SETUP</p>
         <h2 id="startup-setup-title">按需配置数据源</h2>
-        <p>每个平台都可以单独打开、登录和检测。完成一次后，芯探会在这台电脑上保留对应会话。</p>
+        <p>每个平台都可以单独打开和登录。完成配置后，芯探会自动测试查找、滚动、内容读取和来源链接。</p>
         <div className="startup-source-row">{ALL_SOURCES.map((source) => <span key={source}>{initials(source)}<small>{source}</small></span>)}</div>
         <div className="startup-hint"><b>不必一次配置全部</b><span>进入“数据源”后，选择当前需要的平台逐个配置即可。</span></div>
         <div className="startup-actions">
