@@ -6,19 +6,19 @@ export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.includes("localhost") ? "http" : "https");
-  const imageUrl = `${protocol}://${host}/og-v2.png`;
-  const description = "从公开社媒内容中识别人才流动与企业异动线索，保留证据并按价值排序。";
+  const imageUrl = `${protocol}://${host}/og-v3.png`;
+  const description = "AI-assisted talent signal intelligence from public Zhihu content, ranked with source evidence.";
   return {
-    title: "芯探｜芯片猎头社媒情报助手",
+    title: "Xintan — Talent Signal Intelligence",
     description,
     openGraph: {
-      title: "芯探｜芯片猎头社媒情报助手",
+      title: "Xintan — Talent Signal Intelligence",
       description,
       images: [{ url: imageUrl, width: 1672, height: 941, alt: "XINTAN Talent Signal Intelligence" }],
     },
     twitter: {
       card: "summary_large_image",
-      title: "芯探｜芯片猎头社媒情报助手",
+      title: "Xintan — Talent Signal Intelligence",
       description,
       images: [imageUrl],
     },

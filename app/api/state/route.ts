@@ -11,6 +11,15 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+function nextScheduledAt(schedule: string) {
+  if (schedule === "仅手动运行") return null;
+  const next = new Date();
+  next.setDate(next.getDate() + (schedule.includes("每周") ? 7 : 1));
+  const time = schedule.match(/(\d{1,2}):(\d{2})/);
+  if (time) next.setHours(Number(time[1]), Number(time[2]), 0, 0);
+  return next.toISOString();
+}
+
 function normalizeTask(row: Record<string, unknown>) {
   return {
     id: row.id,
@@ -144,18 +153,18 @@ export async function POST(request: Request) {
           id,
           String(task.name ?? "未命名任务"),
           String(task.jd ?? ""),
-          JSON.stringify(task.sources ?? []),
+          JSON.stringify(["知乎"]),
           JSON.stringify(task.techKeywords ?? []),
           JSON.stringify(task.companyKeywords ?? []),
           JSON.stringify(task.signalKeywords ?? []),
           JSON.stringify(task.excludeKeywords ?? []),
-          String(task.schedule ?? "每天 09:00"),
+          String(task.schedule ?? "仅手动运行"),
           String(task.timeRange ?? "近30天"),
           now,
         )
         ,
         db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify(task.sourceLimits ?? {}), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, now),
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify({ 知乎: Math.max(1, Math.min(50, Number((task.sourceLimits as Record<string, unknown> | undefined)?.知乎 ?? 10))) }), task.scheduleEnabled === false ? 0 : 1, task.scheduleEnabled === false ? null : nextScheduledAt(String(task.schedule ?? "仅手动运行")), now),
       ]);
       return Response.json({ ok: true, id });
     }
@@ -168,7 +177,7 @@ export async function POST(request: Request) {
       const taskId = String(payload.taskId ?? "");
       const origin = new URL(request.url).origin;
       const localJobs = payload.localJobs && typeof payload.localJobs === "object"
-        ? payload.localJobs as Record<string, { jobId?: string; status?: string; phase?: string; progress?: number; fetched?: number; inspected?: number; kept?: number; filtered?: number; currentAction?: string; currentItem?: unknown; analysisTrace?: unknown[]; liveViewUrl?: string }>
+        ? payload.localJobs as Record<string, { jobId?: string; status?: string; phase?: string; progress?: number; fetched?: number; inspected?: number; kept?: number; filtered?: number; prefiltered?: number; targetItems?: number; triggerMode?: string; currentAction?: string; currentItem?: unknown; analysisTrace?: unknown[]; liveViewUrl?: string }>
         : {};
       const localCandidates = Array.isArray(payload.localCandidates) ? payload.localCandidates.slice(0, 300).map((item) => {
         const candidate = item && typeof item === "object" ? item as Record<string, unknown> : {};
@@ -189,11 +198,11 @@ export async function POST(request: Request) {
       if (!id) return Response.json({ error: "缺少任务ID" }, { status: 400 });
       await db.batch([
         db.prepare(`UPDATE tasks SET name=?, jd=?, status=?, sources=?, tech_keywords=?, company_keywords=?, signal_keywords=?, exclude_keywords=?, schedule=?, time_range=? WHERE id=?`)
-          .bind(String(task.name ?? "未命名任务"), String(task.jd ?? ""), String(task.status ?? "active"), JSON.stringify(task.sources ?? []),
+          .bind(String(task.name ?? "未命名任务"), String(task.jd ?? ""), String(task.status ?? "active"), JSON.stringify(["知乎"]),
             JSON.stringify(task.techKeywords ?? []), JSON.stringify(task.companyKeywords ?? []), JSON.stringify(task.signalKeywords ?? []),
-            JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "每天 09:00"), String(task.timeRange ?? "近30天"), id),
+            JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "仅手动运行"), String(task.timeRange ?? "近30天"), id),
         db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify(task.sourceLimits ?? {}), task.scheduleEnabled === false ? 0 : 1, String(task.nextRunAt ?? "") || null, new Date().toISOString()),
+          .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify({ 知乎: Math.max(1, Math.min(50, Number((task.sourceLimits as Record<string, unknown> | undefined)?.知乎 ?? 10))) }), task.scheduleEnabled === false ? 0 : 1, task.scheduleEnabled === false ? null : nextScheduledAt(String(task.schedule ?? "仅手动运行")), new Date().toISOString()),
       ]);
       return Response.json({ ok: true });
     }

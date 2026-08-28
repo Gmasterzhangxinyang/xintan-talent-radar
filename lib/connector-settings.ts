@@ -1,7 +1,7 @@
 import { parseStringArray } from "./json";
 
 export const COMPUTER_AGENT_ID = "computer-agent";
-export const COMPUTER_SOURCES = ["抖音", "微博", "小红书", "知乎"];
+export const COMPUTER_SOURCES = ["知乎"];
 
 export type ConnectorSettingRow = {
   endpoint: string;

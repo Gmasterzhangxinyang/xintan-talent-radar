@@ -11,6 +11,8 @@ export type TaskRecord = {
   schedule: string;
   time_range: string;
   source_limits?: string;
+  author_blacklist?: string;
+  company_blacklist?: string;
 };
 
 export type CandidateItem = {

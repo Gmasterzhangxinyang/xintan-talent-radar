@@ -103,15 +103,23 @@ export async function ensureDatabase() {
     await db.prepare("ALTER TABLE task_filters ADD COLUMN source_limits TEXT NOT NULL DEFAULT '{}'").run();
   }
 
-  // EETOP has been removed from the supported product surface. Clean older
-  // databases as well as fresh seed data so existing tasks cannot dispatch it.
+  // Version 1 is deliberately Zhihu-only. Remove legacy demo/platform rows,
+  // preserve genuine Zhihu results, and normalize every existing task.
   await db.batch([
-    db.prepare("DELETE FROM sources WHERE name = 'EETOP' OR id = 'eetop'"),
-    db.prepare("DELETE FROM leads WHERE source = 'EETOP'"),
-    db.prepare("DELETE FROM raw_items WHERE source = 'EETOP'"),
-    db.prepare("DELETE FROM connector_jobs WHERE source = 'EETOP'"),
-    db.prepare(`UPDATE tasks SET sources = COALESCE((SELECT json_group_array(value) FROM json_each(tasks.sources) WHERE value <> 'EETOP'), '[]') WHERE sources LIKE '%EETOP%'`),
-    db.prepare(`UPDATE connector_settings SET enabled_sources = COALESCE((SELECT json_group_array(value) FROM json_each(connector_settings.enabled_sources) WHERE value <> 'EETOP'), '[]') WHERE enabled_sources LIKE '%EETOP%'`),
+    db.prepare("DELETE FROM sources WHERE name <> '知乎'"),
+    db.prepare("DELETE FROM leads WHERE source <> '知乎' OR id IN ('lead-1','lead-3','lead-4','lead-5','lead-6')"),
+    db.prepare("DELETE FROM raw_items WHERE source <> '知乎'"),
+    db.prepare("DELETE FROM connector_jobs WHERE source <> '知乎'"),
+    db.prepare("DELETE FROM runs WHERE id IN ('run-1','run-2','run-3')"),
+    db.prepare(`UPDATE tasks SET sources = '["知乎"]'`),
+    db.prepare(`UPDATE connector_settings SET enabled_sources = '["知乎"]'`),
+    db.prepare(`INSERT OR REPLACE INTO sources (id, name, mode, status, last_check, coverage, note) VALUES ('zhihu', '知乎', '本机浏览器 Agent', '待检测', '未执行', '公开问答、文章与评论', '复用本机知乎登录状态；逐条打开详情并由AI评估')`),
+    db.prepare(`UPDATE tasks SET discovered = (SELECT COUNT(*) FROM leads WHERE leads.task_id = tasks.id), high_value = (SELECT COUNT(*) FROM leads WHERE leads.task_id = tasks.id AND leads.priority = 'A')`),
+    db.prepare(`UPDATE task_filters SET source_limits = json_object('知乎', COALESCE(json_extract(source_limits, '$.知乎'), 10))`),
+    db.prepare(`INSERT INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at)
+      SELECT id, '[]', '[]', json_object('知乎', 10), CASE WHEN schedule = '仅手动运行' THEN 0 ELSE 1 END,
+        CASE WHEN schedule = '仅手动运行' THEN NULL ELSE datetime('now', '+1 day') END, datetime('now')
+      FROM tasks WHERE NOT EXISTS (SELECT 1 FROM task_filters WHERE task_filters.task_id = tasks.id)`),
   ]);
 
   const taskCount = await db.prepare("SELECT COUNT(*) AS count FROM tasks").first<{ count: number }>();
@@ -120,36 +128,12 @@ export async function ensureDatabase() {
   const now = new Date().toISOString();
   await db.batch([
     db.prepare(`INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("task-gpu", "GPU数字验证工程师", "上海GPU数字验证工程师，5年以上经验，熟悉UVM、SystemVerilog、VCS、Verdi，有SoC流片经验。", "active", JSON.stringify(["抖音", "微博", "EDA365"]), JSON.stringify(["UVM", "SystemVerilog", "VCS", "Verdi", "SoC验证"]), JSON.stringify(["壁仞", "燧原", "沐曦"]), JSON.stringify(["看机会", "准备离职", "部门调整", "项目被砍"]), JSON.stringify(["培训", "课程", "招生", "广告"]), "每天 09:00", "近30天", 84, 12, now, now),
+      .bind("task-gpu", "GPU数字验证工程师", "上海GPU数字验证工程师，5年以上经验，熟悉UVM、SystemVerilog、VCS、Verdi，有SoC流片经验。", "active", JSON.stringify(["知乎"]), JSON.stringify(["UVM", "SystemVerilog", "VCS", "Verdi", "SoC验证"]), JSON.stringify(["壁仞", "燧原", "沐曦"]), JSON.stringify(["看机会", "准备离职", "部门调整", "项目被砍"]), JSON.stringify(["培训", "课程", "招生", "广告"]), "每天 09:00", "近30天", 0, 0, null, now),
     db.prepare(`INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("task-pd", "先进工艺数字后端", "数字后端工程师，7nm及以下工艺，熟悉Innovus、PrimeTime、Calibre。", "active", JSON.stringify(["知乎", "小红书", "EDA365"]), JSON.stringify(["数字后端", "Innovus", "PrimeTime", "Calibre", "STA"]), JSON.stringify(["海思", "紫光展锐", "芯原"]), JSON.stringify(["HC", "团队扩招", "项目调整"]), JSON.stringify(["外包培训", "网课"]), "每周一 10:00", "近90天", 43, 7, now, now),
+      .bind("task-pd", "先进工艺数字后端", "数字后端工程师，7nm及以下工艺，熟悉Innovus、PrimeTime、Calibre。", "active", JSON.stringify(["知乎"]), JSON.stringify(["数字后端", "Innovus", "PrimeTime", "Calibre", "STA"]), JSON.stringify(["海思", "紫光展锐", "芯原"]), JSON.stringify(["HC", "团队扩招", "项目调整"]), JSON.stringify(["外包培训", "网课"]), "每周一 10:00", "近90天", 0, 0, null, now),
     db.prepare(`INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("task-company", "重点企业异动监控", "监控GPU、AI芯片及SoC企业的裁员、扩招、项目变动和流片问题。", "paused", JSON.stringify(["微博", "知乎", "抖音", "EDA365"]), JSON.stringify(["GPU", "SoC", "流片", "回片", "良率"]), JSON.stringify(["壁仞", "燧原", "沐曦", "摩尔线程"]), JSON.stringify(["裁员", "扩招", "冻结HC", "流片延期", "项目暂停"]), JSON.stringify(["媒体转载", "广告"]), "每天 18:00", "近7天", 128, 19, now, now),
-
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("lead-1", "task-gpu", "抖音", "芯片搬砖人", "douyin_4c9a", "2026-08-16 21:34", "项目刚被砍，组里最近变化挺大，准备看看上海的新机会。", JSON.stringify(["GPU", "数字验证", "项目变动"]), "强", "人才线索", "A", 91, "疑似GPU验证团队人员流动", "准备看看上海的新机会", "https://www.douyin.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("lead-3", "task-company", "微博", "半导体观察员", "wb_7320", "2026-08-15 18:10", "某GPU公司验证团队近期还在扩大规模，多个方向重新开放HC。", JSON.stringify(["扩招", "GPU", "HC开放"]), "无", "企业情报", "A", 86, "验证团队扩招，可能产生招聘需求", "多个方向重新开放HC", "https://weibo.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("lead-4", "task-pd", "知乎", "后端老兵", "zh_51e8", "2026-08-14 09:42", "最近项目收尾，后续方向不太确定，做过7nm后端和完整sign-off。", JSON.stringify(["7nm", "数字后端", "Sign-off"]), "中", "人才线索", "B", 79, "技术匹配，求职表达不明确", "后续方向不太确定", "https://www.zhihu.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("lead-5", "task-company", "EDA365", "EDA小匠", "eda_1923", "2026-08-13 16:05", "听说二次流片时间又往后推，验证和后端最近都在加班收敛问题。", JSON.stringify(["流片延期", "验证", "数字后端"]), "无", "企业情报", "B", 76, "项目进度存在风险，需交叉验证", "二次流片时间又往后推", "https://bbs.eda365.com/", "待审核", now),
-    db.prepare(`INSERT INTO leads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("lead-6", "task-gpu", "小红书", "IC日常记录", "xhs_27ad", "2026-08-12 20:17", "做验证第三年，想了解一下上海AI芯片公司的机会和团队情况。", JSON.stringify(["AI芯片", "数字验证", "上海"]), "强", "人才线索", "A", 84, "主动了解机会，年限略低于JD", "想了解一下上海AI芯片公司的机会", "https://www.xiaohongshu.com/", "待审核", now),
-
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("run-1", "task-gpu", "GPU数字验证工程师", now, now, "完成", 620, 410, 126, 84, 12, "5个来源执行完成，增量游标已更新"),
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("run-2", "task-pd", "先进工艺数字后端", now, now, "完成", 318, 208, 67, 43, 7, "知乎连接器使用验证样本，其余来源正常"),
-    db.prepare(`INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind("run-3", "task-company", "重点企业异动监控", now, now, "部分完成", 244, 151, 48, 45, 8, "小红书登录状态需要人工确认"),
-
-    ...[
-      ["douyin", "抖音", "电脑Agent", "待配置", "未执行", "公开视频与评论", "需配置电脑接管产品的HTTP任务接口和登录账号"],
-      ["weibo", "微博", "电脑Agent", "待配置", "未执行", "公开关键词结果", "需配置电脑接管产品的HTTP任务接口和登录账号"],
-      ["xiaohongshu", "小红书", "电脑Agent", "待配置", "未执行", "公开笔记与评论", "需配置电脑接管产品的HTTP任务接口和登录账号"],
-      ["zhihu", "知乎", "电脑Agent / 公开网页", "待配置", "未执行", "公开问答与文章", "需配置电脑接管产品，覆盖率取决于账号与平台风控"],
-      ["eda365", "EDA365", "公开网页连接器", "可执行", "按任务检查", "公开论坛主题", "已实现公开索引检索，实际覆盖由站点可访问性决定"],
-    ].map((source) => db.prepare("INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?)").bind(...source)),
+      .bind("task-company", "重点企业异动监控", "监控GPU、AI芯片及SoC企业的裁员、扩招、项目变动和流片问题。", "paused", JSON.stringify(["知乎"]), JSON.stringify(["GPU", "SoC", "流片", "回片", "良率"]), JSON.stringify(["壁仞", "燧原", "沐曦", "摩尔线程"]), JSON.stringify(["裁员", "扩招", "冻结HC", "流片延期", "项目暂停"]), JSON.stringify(["媒体转载", "广告"]), "每天 18:00", "近7天", 0, 0, null, now),
+    db.prepare("INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind("zhihu", "知乎", "本机浏览器 Agent", "待检测", "未执行", "公开问答、文章与评论", "复用本机知乎登录状态；逐条打开详情并由AI评估"),
   ]);
 }

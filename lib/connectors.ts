@@ -3,10 +3,8 @@ import type { CandidateItem, TaskRecord } from "./types";
 import { parseStringArray, unique } from "./json";
 import { loadConnectorSettings, validateAgentEndpoint } from "./connector-settings";
 
-const FORUMS: Record<string, string> = {
-  EDA365: "https://bbs.eda365.com/forum.php",
-};
-export const SOCIAL_SOURCES = new Set(["抖音", "微博", "小红书", "知乎"]);
+const FORUMS: Record<string, string> = {};
+export const SOCIAL_SOURCES = new Set(["知乎"]);
 
 function plainText(html: string) {
   return html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -63,12 +61,13 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     jobId: id, taskId: args.task.id, platform: args.source, queries,
     taskName: args.task.name, techKeywords: parseStringArray(args.task.tech_keywords), companyKeywords: parseStringArray(args.task.company_keywords),
     signalKeywords: parseStringArray(args.task.signal_keywords), excludeKeywords: parseStringArray(args.task.exclude_keywords), timeRange: args.task.time_range,
-    targetItems: Math.max(1, Math.min(50, Number(sourceLimits[args.source] ?? ({ 知乎: 15, EDA365: 15, 微博: 8, 小红书: 5, 抖音: 5 }[args.source] ?? 10)))), commentTarget: 20,
+    authorBlacklist: parseStringArray(args.task.author_blacklist), companyBlacklist: parseStringArray(args.task.company_blacklist),
+    targetItems: Math.max(1, Math.min(50, Number(sourceLimits.知乎 ?? 10))), commentTarget: 20,
     fields: ["snippet", "author", "authorId", "publishedAt", "url"],
     browser: {
       reuseExistingProfile: true, interactive: true, requireExistingLogin: true,
-      requireLiveView: true, liveViewMode: "webrtc", heartbeatIntervalMs: 5_000,
-      pauseOnViewerDisconnect: true,
+      requireLiveView: false, liveViewMode: "direct_operator_window", heartbeatIntervalMs: 5_000,
+      pauseOnViewerDisconnect: false,
     },
     callbackUrl: `${args.callbackBase}/api/connectors/computer-agent/callback`,
   };
@@ -82,12 +81,6 @@ export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRe
     let liveViewUrl = saved?.live_view_url ?? "";
     const proposedLiveUrl = String(accepted.liveViewUrl ?? accepted.viewerUrl ?? "");
     if (proposedLiveUrl) liveViewUrl = validateAgentEndpoint(proposedLiveUrl);
-    if (!liveViewUrl) {
-      await fetch(`${endpoint}/v1/search-tasks/${id}/cancel`, {
-        method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(5_000),
-      }).catch(() => undefined);
-      throw new Error("电脑助手未建立实时同屏，任务没有执行");
-    }
     await args.db.prepare("INSERT INTO connector_jobs (id, task_id, source, status, dispatched_at, progress, current_action, live_view_url, updated_at) VALUES (?, ?, ?, 'dispatched', ?, 5, ?, ?, ?)")
       .bind(id, args.task.id, args.source, now, `正在启动${args.source}浏览器`, liveViewUrl, now).run();
     return { id, status: "dispatched", liveViewUrl };

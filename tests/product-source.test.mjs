@@ -9,13 +9,15 @@ const hostingPath = new URL("../.openai/hosting.json", import.meta.url);
 test("covers the complete MVP workflow", async () => {
   const page = await readFile(pagePath, "utf8");
   for (const capability of [
-    "创建检索任务", "AI拆解技术栈和检索词", "增量扫描", "线索工作台",
-    "导出Excel", "运行日志", "数据源", "求职信号", "企业情报", "每个平台深读多少条", "sourceLimits",
+    "Create search", "AI拆解技术栈和检索词", "Run now", "Signal inbox",
+    "Export Excel", "运行日志", "数据源", "求职信号", "企业情报", "知乎深读范围", "技术栈关键词（可编辑）", "sourceLimits",
   ]) {
     assert.match(page, new RegExp(capability));
   }
   assert.match(page, /reviewLead/);
   assert.match(page, /runSearchTask/);
+  assert.match(page, /const ALL_SOURCES = \["知乎"\]/);
+  assert.doesNotMatch(page, /const ALL_SOURCES[^\n]+抖音/);
 });
 
 test("uses D1-backed product records", async () => {
@@ -53,10 +55,10 @@ test("exposes a per-item analysis audit instead of blind scrolling", async () =>
     readFile(schemaPath, "utf8"),
     readFile(new URL("../drizzle/0006_analysis_audit.sql", import.meta.url), "utf8"),
   ]);
-  for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "每一条都打开详情深读", "详情页可见内容", "AI引用的原文证据", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
+  for (const capability of ["AnalysisWorkspace", "analysisTrace", "AI中枢", "Evidence-first review", "详情页可见内容", "AI引用的原文证据", "AI决策摘要", "下一步动作", "安全策略", "命中依据", "保留", "过滤"]) {
     assert.match(page, new RegExp(capability));
   }
-  for (const capability of ["askAiBrain", "askAiBrainWithRetry", "ai_retry", "ai_fail_soft", "AI待复核", "enforceAgentPolicy", "showItemAnalysis", "buildSearchPlan", "multi_query_search_plan", "no_early_item_stop", "单条内容判断结束不等于整个平台任务结束", "mandatoryDeepRead", "evidenceQuotes", "reading_detail", "readCommentsProgressively", "extractPublicMetadata", "visualFrames", "targetItems", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop"]) {
+  for (const capability of ["askAiBrain", "askAiBrainWithRetry", "ai_retry", "ai_fail_soft", "AI待复核", "enforceAgentPolicy", "showItemAnalysis", "buildSearchPlan", "query_rotation", "freshness_first", "official_search_metadata", "sort_by=created_time", "readRankedZhihuSearchResults", "strict_time_filter", "blacklist_filter", "单条内容判断结束不等于整个平台任务结束", "mandatoryDeepRead", "evidenceQuotes", "reading_detail", "reading_comments", "readDetailProgressively", "data-xintan-detail", "readCommentsProgressively", "data-xintan-comment-active", "逐段阅读正文", "逐条阅读公开评论", "extractDetailContent", "extractPublicMetadata", "hardFilterReasons", "visualFrames", "targetItems", "data-xintan-candidate", "currentItem", "analysisTrace", "matchedKeywords", "central_ai_brain", "agent_loop", "background_scheduler"]) {
     assert.match(assistant, new RegExp(capability));
   }
   assert.match(schema, /analysisTrace/);

@@ -86,6 +86,8 @@ type LocalAgentJob = {
   analysisTrace?: unknown[];
   liveViewUrl?: string;
   targetItems?: number;
+  triggerMode?: string;
+  prefiltered?: number;
 };
 
 export async function runTask(
@@ -95,7 +97,7 @@ export async function runTask(
   localJobs: Record<string, LocalAgentJob> = {},
   localCandidates: CandidateItem[] = [],
 ) {
-  const task = await db.prepare("SELECT t.*, f.source_limits FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id WHERE t.id = ?").bind(taskId).first<TaskRecord>();
+  const task = await db.prepare("SELECT t.*, f.source_limits, f.author_blacklist, f.company_blacklist FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id WHERE t.id = ?").bind(taskId).first<TaskRecord>();
   if (!task) throw new Error("任务不存在");
   if (task.status !== "active") throw new Error("任务已暂停，请先恢复任务");
   const runId = `run-${crypto.randomUUID()}`;
@@ -122,14 +124,23 @@ export async function runTask(
             Math.max(0, Number(localJob.fetched ?? sourceCandidates.length)), Math.max(0, Math.min(100, Number(localJob.progress ?? 10))), action,
             String(localJob.phase ?? "").slice(0, 40), Math.max(0, Number(localJob.inspected ?? 0)), Math.max(0, Number(localJob.kept ?? sourceCandidates.length)),
             Math.max(0, Number(localJob.filtered ?? 0)), JSON.stringify(localJob.currentItem ?? {}), JSON.stringify((localJob.analysisTrace ?? []).slice(-40)), liveViewUrl, startedAt).run();
+        const inspected = Math.max(0, Number(localJob.inspected ?? localJob.fetched ?? sourceCandidates.length));
+        const prefiltered = Math.max(0, Number(localJob.prefiltered ?? 0));
+        const aiFiltered = Math.max(0, Number(localJob.filtered ?? Math.max(0, inspected - sourceCandidates.length)));
+        const mode = localJob.triggerMode === "background" ? "后台增量" : "单次检索";
+        total.fetched += inspected + prefiltered;
+        total.filtered += aiFiltered;
         if (sourceCandidates.length) {
           const stats = await ingestCandidates(db, task, sourceCandidates);
-          for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];
-          messages.push(persistedStatus === "partial" ? `${source}:仅深读${localJob.inspected ?? 0}/${localJob.targetItems ?? 0}条(${action})` : `${source}:获取${stats.fetched}/新增${stats.valid}`);
+          total.filtered += stats.filtered;
+          total.deduped += stats.deduped;
+          total.valid += stats.valid;
+          total.highValue += stats.highValue;
+          messages.push(`${source}:${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered) + stats.filtered}，重复${stats.deduped}，新增${stats.valid}${persistedStatus === "partial" ? `（${action}）` : ""}`);
         } else if (persistedStatus === "failed") {
           messages.push(`${source}:失败(${action})`);
         } else {
-          messages.push(`${source}:${waitingLogin ? "等待登录" : "已打开检索页，未读取到公开结果"}`);
+          messages.push(`${source}:${waitingLogin ? "等待登录" : `${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered)}，新增0`}`);
         }
         continue;
       }

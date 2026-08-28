@@ -6,19 +6,16 @@ import { chromium } from "playwright-core";
 
 const HOST = "127.0.0.1";
 const PORT = 8765;
+const APP_BASE_URL = String(process.env.XINTAN_APP_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const SITE_ORIGINS = new Set([
   "https://xintan-talent-radar.iyihioh.chatgpt.site",
   "http://localhost:3000",
   "http://localhost:5173",
 ]);
 const PLATFORM_URLS = {
-  "抖音": "https://www.douyin.com/",
-  "微博": "https://weibo.com/",
-  "小红书": "https://www.xiaohongshu.com/explore",
   "知乎": "https://www.zhihu.com/",
-  "EDA365": "https://bbs.eda365.com/forum.php",
 };
-const SOCIAL_PLATFORMS = ["抖音", "微博", "小红书", "知乎"];
+const SOCIAL_PLATFORMS = ["知乎"];
 const searchJobs = new Map();
 const verificationQueries = ["芯片", "设计"];
 let operationQueue = Promise.resolve();
@@ -35,7 +32,7 @@ const DEFAULT_AI_SETTINGS = {
   status: "not_configured", lastTestAt: "", lastError: "",
   policy: {
     maxStepsPerSource: 24, maxItemsPerSource: 12, allowOpenDetail: true, allowReadComments: true,
-    allowRefineSearch: true, allowCrossPlatformSuggestion: true,
+    allowRefineSearch: true, allowCrossPlatformSuggestion: false,
   },
 };
 let aiSettings = structuredClone(DEFAULT_AI_SETTINGS);
@@ -50,10 +47,14 @@ try {
   const saved = JSON.parse(readFileSync(AI_SETTINGS_FILE, "utf8"));
   aiSettings = { ...DEFAULT_AI_SETTINGS, ...saved, policy: { ...DEFAULT_AI_SETTINGS.policy, ...(saved.policy ?? {}) } };
 } catch { /* configured from AI center later */ }
-delete verificationStates.EETOP;
 let browserContext;
 let browserConnection;
 let operatorPage;
+let schedulerRunning = false;
+let schedulerLastRunAt = "";
+let schedulerLastError = "";
+
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
 function saveSessions() {
   writeFileSync(SESSION_FILE, JSON.stringify({ profile: "xintan-dedicated-v1", sessions: sessionStates, verifications: verificationStates }, null, 2));
@@ -64,7 +65,7 @@ function publicAiSettings() {
     provider: aiSettings.provider, baseUrl: aiSettings.baseUrl, model: aiSettings.model,
     hasApiKey: Boolean(aiSettings.apiKey), status: aiSettings.status, lastTestAt: aiSettings.lastTestAt,
     lastError: aiSettings.lastError, policy: aiSettings.policy,
-    allowedActions: ["检索", "滚动", "读取公开内容", "打开站内原文", "读取公开评论", "调整关键词", "建议跨平台核验", "返回"],
+    allowedActions: ["检索", "滚动", "读取公开内容", "打开知乎原文", "读取公开评论", "调整关键词", "返回"],
     blockedActions: ["私信", "评论或发布", "点赞关注", "上传下载", "输入密码或验证码", "绕过人机验证", "访问非白名单域名"],
   };
 }
@@ -72,6 +73,80 @@ function publicAiSettings() {
 function saveAiSettings() {
   writeFileSync(AI_SETTINGS_FILE, JSON.stringify(aiSettings, null, 2));
   chmodSync(AI_SETTINGS_FILE, 0o600);
+}
+
+function buildSearchJob(payload) {
+  const platform = "知乎";
+  const jobId = String(payload.jobId ?? `local-${Date.now()}`);
+  const queries = Array.isArray(payload.queries) ? payload.queries.map(String) : [];
+  const needsLogin = sessionStates[platform]?.status !== "logged_in";
+  return {
+    jobId, platform, status: needsLogin ? "waiting_login" : "running", progress: 10,
+    currentAction: needsLogin ? "已打开知乎，等待你完成登录" : "已在知乎打开关键词检索",
+    liveViewUrl: "", searchUrl: searchUrl(platform, queries), createdAt: new Date().toISOString(),
+    triggerMode: String(payload.triggerMode ?? "manual") === "background" ? "background" : "manual",
+    taskName: String(payload.taskName ?? "猎头情报任务"), timeRange: String(payload.timeRange ?? "近30天"), queries,
+    targetItems: Math.max(1, Math.min(50, Number(payload.targetItems ?? 10))), commentTarget: Math.max(1, Math.min(50, Number(payload.commentTarget ?? 20))),
+    itemsPerQuery: Math.max(1, Math.min(2, Number(payload.itemsPerQuery ?? 2))),
+    techKeywords: Array.isArray(payload.techKeywords) ? payload.techKeywords.map(String) : queries,
+    companyKeywords: Array.isArray(payload.companyKeywords) ? payload.companyKeywords.map(String) : [],
+    signalKeywords: Array.isArray(payload.signalKeywords) ? payload.signalKeywords.map(String) : [],
+    excludeKeywords: Array.isArray(payload.excludeKeywords) ? payload.excludeKeywords.map(String) : [],
+    authorBlacklist: Array.isArray(payload.authorBlacklist) ? payload.authorBlacklist.map(String) : [],
+    companyBlacklist: Array.isArray(payload.companyBlacklist) ? payload.companyBlacklist.map(String) : [],
+    phase: needsLogin ? "waiting_login" : "searching", inspected: 0, kept: 0, filtered: 0, analysisTrace: [],
+  };
+}
+
+async function runDueTasks({ force = false, taskId = "" } = {}) {
+  if (schedulerRunning) return { ok: false, status: "busy", message: "后台扫描正在运行" };
+  schedulerRunning = true;
+  schedulerLastError = "";
+  try {
+    const stateResponse = await fetch(`${APP_BASE_URL}/api/state`, { signal: AbortSignal.timeout(15_000) });
+    if (!stateResponse.ok) throw new Error(`读取任务失败：HTTP ${stateResponse.status}`);
+    const state = await stateResponse.json();
+    const now = Date.now();
+    const tasks = (Array.isArray(state.tasks) ? state.tasks : []).filter((task) => {
+      if (taskId && task.id !== taskId) return false;
+      if (task.status !== "active" || !Array.isArray(task.sources) || !task.sources.includes("知乎")) return false;
+      if (!force && task.scheduleEnabled === false) return false;
+      if (force) return true;
+      const next = Date.parse(String(task.nextRunAt ?? ""));
+      return Number.isFinite(next) && next <= now;
+    });
+    const completed = [];
+    for (const task of tasks.slice(0, force ? 1 : 3)) {
+      const job = buildSearchJob({
+        jobId: `scheduled-${task.id}-${Date.now()}`, triggerMode: "background", taskName: task.name,
+        queries: [...(task.techKeywords ?? []), ...(task.companyKeywords ?? []), ...(task.signalKeywords ?? [])],
+        techKeywords: task.techKeywords, companyKeywords: task.companyKeywords, signalKeywords: task.signalKeywords,
+        excludeKeywords: task.excludeKeywords, authorBlacklist: task.authorBlacklist, companyBlacklist: task.companyBlacklist,
+        timeRange: task.timeRange, targetItems: Number(task.sourceLimits?.知乎 ?? 10), commentTarget: 20,
+      });
+      if (job.status === "waiting_login") {
+        completed.push({ taskId: task.id, status: "waiting_login" });
+        continue;
+      }
+      searchJobs.set(job.jobId, job);
+      operationQueue = operationQueue.then(() => processSearchJob(job, job.queries));
+      await operationQueue;
+      const result = searchJobs.get(job.jobId) ?? job;
+      const callback = await fetch(`${APP_BASE_URL}/api/state`, {
+        method: "POST", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "runTask", taskId: task.id, localJobs: { 知乎: result }, localCandidates: result.results ?? [] }),
+      });
+      if (!callback.ok) throw new Error(`写入扫描结果失败：HTTP ${callback.status}`);
+      completed.push({ taskId: task.id, jobId: job.jobId, status: result.status, inspected: result.inspected ?? 0, kept: result.kept ?? 0 });
+    }
+    schedulerLastRunAt = new Date().toISOString();
+    return { ok: true, status: "completed", checked: tasks.length, completed };
+  } catch (error) {
+    schedulerLastError = error instanceof Error ? error.message : String(error);
+    return { ok: false, status: "failed", error: schedulerLastError };
+  } finally {
+    schedulerRunning = false;
+  }
 }
 
 const AI_DECISION_SCHEMA = {
@@ -154,7 +229,15 @@ function enforceAgentPolicy(decision, job, item) {
 }
 
 async function ensureBrowser() {
-  if (browserContext) return browserContext;
+  if (browserContext) {
+    try {
+      browserContext.pages();
+      return browserContext;
+    } catch {
+      browserContext = undefined;
+      operatorPage = undefined;
+    }
+  }
   try {
     browserConnection = await chromium.connectOverCDP("http://127.0.0.1:9222");
     browserContext = browserConnection.contexts()[0];
@@ -169,41 +252,53 @@ async function ensureBrowser() {
     viewport: null,
     args: ["--window-size=760,620", "--window-position=80,70", "--remote-debugging-port=9222", "--disable-blink-features=AutomationControlled"],
   });
-  browserContext.on("close", () => { browserContext = undefined; });
+  browserContext.on("close", () => { browserContext = undefined; operatorPage = undefined; });
   return browserContext;
 }
 
 async function openControlledPage(target) {
-  const context = await ensureBrowser();
-  const page = operatorPage && !operatorPage.isClosed() ? operatorPage : await context.newPage();
-  operatorPage = page;
-  await page.goto(target, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
-  try {
-    const session = await context.newCDPSession(page);
-    const { windowId } = await session.send("Browser.getWindowForTarget");
-    await session.send("Browser.setWindowBounds", { windowId, bounds: { left: 80, top: 70, width: 760, height: 620, windowState: "normal" } });
-    await session.detach();
-  } catch { /* window is still usable when resizing is unavailable */ }
-  await page.bringToFront();
-  return page;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const context = await ensureBrowser();
+      const page = operatorPage && !operatorPage.isClosed() ? operatorPage : await context.newPage();
+      operatorPage = page;
+      await page.goto(target, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      if (page.isClosed()) throw new Error("操作窗口已关闭");
+      try {
+        const session = await context.newCDPSession(page);
+        const { windowId } = await session.send("Browser.getWindowForTarget");
+        await session.send("Browser.setWindowBounds", { windowId, bounds: { left: 80, top: 70, width: 760, height: 620, windowState: "normal" } });
+        await session.detach();
+      } catch { /* window is still usable when resizing is unavailable */ }
+      await page.bringToFront();
+      return page;
+    } catch (error) {
+      lastError = error;
+      operatorPage = undefined;
+      await delay(500);
+    }
+  }
+  throw lastError ?? new Error("无法建立知乎操作窗口");
 }
 
 function searchUrl(platform, queries) {
   const keyword = queries.filter(Boolean).slice(0, 8).join(" ").trim();
   const encoded = encodeURIComponent(keyword);
-  if (platform === "抖音") return `https://www.douyin.com/search/${encoded}?type=general`;
-  if (platform === "微博") return `https://s.weibo.com/weibo?q=${encoded}`;
-  if (platform === "小红书") return `https://www.xiaohongshu.com/search_result?keyword=${encoded}`;
-  if (platform === "知乎") return `https://www.zhihu.com/search?type=content&q=${encoded}`;
-  return PLATFORM_URLS[platform];
+  return `https://www.zhihu.com/search?type=content&q=${encoded}&sort_by=created_time`;
 }
 
 function buildSearchPlan(job, queries) {
   const clean = (values) => [...new Set((Array.isArray(values) ? values : []).map((value) => String(value).trim()).filter(Boolean))];
   const companies = clean(job.companyKeywords).slice(0, 6);
-  const signals = clean(job.signalKeywords).slice(0, 8);
+  const rawSignals = clean(job.signalKeywords).slice(0, 10);
+  const eventPattern = /裁员|扩招|团队|项目|流片|回片|离职|跳槽|机会|内推|hc/i;
+  const signals = [...rawSignals.filter((signal) => eventPattern.test(signal)), ...rawSignals.filter((signal) => !eventPattern.test(signal))];
   const technologies = clean(job.techKeywords).slice(0, 6);
   const fallbacks = clean(queries).slice(0, 8);
+  const now = new Date();
+  const rangeDays = Number(String(job.timeRange || "近30天").match(/\d+/)?.[0] ?? 30);
+  const freshnessTerm = rangeDays <= 30 ? `${now.getFullYear()}年${now.getMonth() + 1}月` : `${now.getFullYear()}年`;
   const plan = [];
   const seen = new Set();
   const add = (...terms) => {
@@ -214,21 +309,60 @@ function buildSearchPlan(job, queries) {
     plan.push(query);
   };
 
+  companies.forEach((company, index) => add(company, signals[index % Math.max(1, signals.length)] || "团队调整", freshnessTerm));
+  signals.slice(0, 4).forEach((signal) => add("芯片", signal, freshnessTerm));
   companies.forEach((company, index) => add(company, signals[index % Math.max(1, signals.length)] || "团队调整"));
+  companies.forEach((company, index) => add(company, signals[(index + companies.length) % Math.max(1, signals.length)] || "扩招"));
   signals.forEach((signal) => add("芯片", signal));
   technologies.forEach((technology, index) => add(technology, signals[(index + 2) % Math.max(1, signals.length)] || "看机会"));
   add(...fallbacks.slice(0, 3));
   return plan.slice(0, 18).length ? plan.slice(0, 18) : [["芯片"]];
 }
 
+function parseVisibleDate(value) {
+  const text = String(value || "").replace(/^(?:发布于|编辑于|更新于|最后编辑于)\s*/, "").trim();
+  if (!text || text === "未公开") return null;
+  const now = new Date();
+  if (/刚刚/.test(text)) return now;
+  const relative = text.match(/(\d+)\s*(分钟前|小时前|天前)/);
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unitMs = relative[2] === "分钟前" ? 60_000 : relative[2] === "小时前" ? 3_600_000 : 86_400_000;
+    return new Date(now.getTime() - amount * unitMs);
+  }
+  const direct = new Date(text);
+  if (!Number.isNaN(direct.getTime())) return direct;
+  const normalized = text.replace(/[年月]/g, "-").replace(/日/g, "").replace(/\//g, "-").replace(/(\d)\.(?=\d{1,2}(?:\D|$))/g, "$1-");
+  if (/^\d{1,2}-\d{1,2}/.test(normalized)) {
+    const withYear = `${now.getFullYear()}-${normalized}`;
+    const date = new Date(withYear);
+    if (!Number.isNaN(date.getTime())) {
+      if (date.getTime() > now.getTime() + 86_400_000) date.setFullYear(date.getFullYear() - 1);
+      return date;
+    }
+  }
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function hardFilterReasons(job, metadata, detailText) {
+  const searchable = `${metadata.author || ""} ${detailText}`.toLowerCase();
+  const reasons = [];
+  const excludeMatches = (job.excludeKeywords ?? []).filter((term) => searchable.includes(String(term).toLowerCase()));
+  const authorMatches = (job.authorBlacklist ?? []).filter((term) => String(metadata.author || "").toLowerCase().includes(String(term).toLowerCase()));
+  const companyMatches = (job.companyBlacklist ?? []).filter((term) => searchable.includes(String(term).toLowerCase()));
+  if (excludeMatches.length) reasons.push(`命中内容黑名单：${excludeMatches.join("、")}`);
+  if (authorMatches.length) reasons.push(`命中作者黑名单：${authorMatches.join("、")}`);
+  if (companyMatches.length) reasons.push(`命中企业黑名单：${companyMatches.join("、")}`);
+  const publishedDate = parseVisibleDate(metadata.publishedAt);
+  const rangeDays = Number(String(job.timeRange || "近30天").match(/\d+/)?.[0] ?? 30);
+  if (!publishedDate) reasons.push("发布时间不可验证，无法确认满足时间范围");
+  else if (publishedDate.getTime() < Date.now() - rangeDays * 86_400_000) reasons.push(`发布时间超出${job.timeRange || "设置范围"}`);
+  return { reasons, excludeMatches: [...excludeMatches, ...authorMatches, ...companyMatches] };
+}
+
 function isContentUrl(platform, parsed) {
-  const target = `${parsed.pathname}${parsed.search}`;
-  if (platform === "抖音") return /\/(video|note)\//.test(target);
-  if (platform === "微博") return /^\/\d+\/[A-Za-z0-9]+/.test(parsed.pathname) || /\/status\//.test(parsed.pathname);
-  if (platform === "小红书") return /\/(explore|discovery\/item)\//.test(parsed.pathname);
-  if (platform === "知乎") return /\/(question|p)\//.test(parsed.pathname) || /\/answer\//.test(parsed.pathname);
-  if (platform === "EDA365") return /thread-|mod=viewthread|tid=/.test(target);
-  return true;
+  return platform === "知乎" && (/\/(question|p)\//.test(parsed.pathname) || /\/answer\//.test(parsed.pathname));
 }
 
 async function showItemAnalysis(page, item, analysis, position, total, stage) {
@@ -277,25 +411,54 @@ async function showItemAnalysis(page, item, analysis, position, total, stage) {
 }
 
 async function prepareSearchPage(page, platform, queries) {
-  if (SOCIAL_PLATFORMS.includes(platform)) return { performed: true, method: "direct_url" };
-  const forumSearchUrl = new URL("/search.php?mod=forum", PLATFORM_URLS[platform]).toString();
-  await page.goto(forumSearchUrl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
-  let searchInput = page.locator("input#scform_srchtxt:visible, input#srchtxt:visible, input[name='srchtxt']:visible, input[name='keyword']:visible, input[type='search']:visible").first();
-  if (!(await searchInput.count())) {
-    const searchLink = page.locator("a[href*='search.php']:visible, a:has-text('搜索'):visible").first();
-    if (await searchLink.count()) {
-      await searchLink.click({ timeout: 5000 }).catch(() => undefined);
-      await page.waitForTimeout(1200);
-      searchInput = page.locator("input#scform_srchtxt:visible, input#srchtxt:visible, input[name='srchtxt']:visible, input[name='keyword']:visible, input[type='search']:visible").first();
+  return { performed: platform === "知乎" && queries.length > 0 && page.url().includes("/search"), method: "direct_url" };
+}
+
+async function scrollPageVisibly(page, delta = 760) {
+  const measure = () => page.evaluate(() => {
+    const root = document.scrollingElement;
+    const marked = document.querySelector("[data-xintan-scroll-target='1']");
+    const rootMax = Math.max(0, (root?.scrollHeight ?? document.documentElement.scrollHeight) - window.innerHeight);
+    return {
+      windowTop: window.scrollY, rootTop: root?.scrollTop ?? 0, bodyTop: document.body?.scrollTop ?? 0,
+      nestedTop: marked?.scrollTop ?? 0, rootMax,
+      nestedMax: marked ? Math.max(0, marked.scrollHeight - marked.clientHeight) : 0,
+    };
+  }).catch(() => ({ windowTop: 0, rootTop: 0, bodyTop: 0, nestedTop: 0, rootMax: 0, nestedMax: 0 }));
+
+  const pointer = await page.evaluate(() => {
+    document.querySelectorAll("[data-xintan-scroll-target='1']").forEach((element) => element.removeAttribute("data-xintan-scroll-target"));
+    const nested = Array.from(document.querySelectorAll("*"))
+      .filter((element) => !["HTML", "BODY"].includes(element.tagName) && element.clientHeight > 120 && element.scrollHeight > element.clientHeight + 40)
+      .sort((left, right) => (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0];
+    if (nested) {
+      nested.setAttribute("data-xintan-scroll-target", "1");
+      if (nested.scrollTop >= nested.scrollHeight - nested.clientHeight - 8) nested.scrollTop = 0;
     }
+    const rect = nested?.getBoundingClientRect();
+    return {
+      x: rect ? Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width / 2)) : window.innerWidth / 2,
+      y: rect ? Math.max(24, Math.min(window.innerHeight - 24, rect.top + Math.min(rect.height, window.innerHeight) / 2)) : window.innerHeight / 2,
+    };
+  }).catch(() => ({ x: 380, y: 310 }));
+  const before = await measure();
+  await page.mouse.move(pointer.x, pointer.y).catch(() => undefined);
+  await page.mouse.wheel(0, delta).catch(() => undefined);
+  await delay(450);
+  let after = await measure();
+  const changed = () => after.windowTop !== before.windowTop || after.rootTop !== before.rootTop || after.bodyTop !== before.bodyTop || after.nestedTop !== before.nestedTop;
+  let method = "wheel";
+  if (!changed()) {
+    method = "smooth_fallback";
+    await page.evaluate((amount) => {
+      const nested = document.querySelector("[data-xintan-scroll-target='1']");
+      if (nested && nested.scrollHeight > nested.clientHeight + 40) nested.scrollBy({ top: amount, behavior: "smooth" });
+      else window.scrollBy({ top: amount, behavior: "smooth" });
+    }, delta).catch(() => undefined);
+    await delay(650);
+    after = await measure();
   }
-  if (await searchInput.count()) {
-    await searchInput.fill(queries.slice(0, 6).join(" "), { timeout: 5000 });
-    await searchInput.press("Enter", { timeout: 5000 });
-    await page.waitForTimeout(2500);
-    return { performed: true, method: "search_input" };
-  }
-  return { performed: false, method: "unavailable" };
+  return { canScroll: before.rootMax > 0 || before.nestedMax > 0, didScroll: changed(), method, before, after };
 }
 
 async function verifyPlatform(platform) {
@@ -306,7 +469,7 @@ async function verifyPlatform(platform) {
     const destination = searchUrl(platform, verificationQueries);
     const page = await openControlledPage(destination);
     const searchAction = await prepareSearchPage(page, platform, verificationQueries);
-    await page.waitForTimeout(2200);
+    await delay(2200);
 
     let bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
     const pageTitle = await page.title().catch(() => "");
@@ -318,29 +481,13 @@ async function verifyPlatform(platform) {
     if (SOCIAL_PLATFORMS.includes(platform)) record("account", "账号会话", !loginGate, loginGate ? "页面仍要求登录" : "未发现登录拦截");
 
     const joinedKeyword = verificationQueries.join(" ");
-    const searchDetected = SOCIAL_PLATFORMS.includes(platform)
-      ? searchAction.performed && pageUrl !== PLATFORM_URLS[platform] && (decodeURIComponent(pageUrl).includes(verificationQueries[0]) || bodyText.includes(verificationQueries[0]))
-      : searchAction.performed && (bodyText.includes(verificationQueries[0]) || bodyText.includes(joinedKeyword) || /search/i.test(pageUrl));
+    const searchDetected = searchAction.performed && pageUrl !== PLATFORM_URLS[platform]
+      && (decodeURIComponent(pageUrl).includes(verificationQueries[0]) || bodyText.includes(verificationQueries[0]));
     record("search", "关键词查找", searchDetected, searchDetected ? `已执行“${joinedKeyword}”检索` : "未确认检索结果页");
 
-    const beforeScroll = await page.evaluate(() => {
-      const root = document.scrollingElement;
-      const candidates = Array.from(document.querySelectorAll("*")).filter((element) => element.scrollHeight > element.clientHeight + 40);
-      const nested = candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
-      return { rootTop: root?.scrollTop ?? 0, rootMax: root ? root.scrollHeight - root.clientHeight : 0, nestedTop: nested?.scrollTop ?? 0, nestedMax: nested ? nested.scrollHeight - nested.clientHeight : 0 };
-    }).catch(() => ({ rootTop: 0, rootMax: 0, nestedTop: 0, nestedMax: 0 }));
-    await page.mouse.move(700, 500).catch(() => undefined);
-    await page.mouse.wheel(0, 1100).catch(() => undefined);
-    await page.waitForTimeout(1000);
-    const afterScroll = await page.evaluate(() => {
-      const root = document.scrollingElement;
-      const candidates = Array.from(document.querySelectorAll("*")).filter((element) => element.scrollHeight > element.clientHeight + 40);
-      const nested = candidates.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
-      return { rootTop: root?.scrollTop ?? 0, rootMax: root ? root.scrollHeight - root.clientHeight : 0, nestedTop: nested?.scrollTop ?? 0, nestedMax: nested ? nested.scrollHeight - nested.clientHeight : 0 };
-    }).catch(() => ({ rootTop: 0, rootMax: 0, nestedTop: 0, nestedMax: 0 }));
-    const canScroll = beforeScroll.rootMax > 0 || beforeScroll.nestedMax > 0;
-    const didScroll = afterScroll.rootTop > beforeScroll.rootTop || afterScroll.nestedTop > beforeScroll.nestedTop;
-    record("scroll", "滚轮滚动", canScroll && didScroll, !canScroll ? "当前页面没有可滚动内容" : didScroll ? "页面已产生滚动位移" : "页面可滚动，但滚轮未产生位移");
+    await page.evaluate(() => { window.scrollTo(0, 0); document.querySelectorAll("[data-xintan-scroll-target='1']").forEach((element) => { element.scrollTop = 0; }); }).catch(() => undefined);
+    const scrollResult = await scrollPageVisibly(page, 1100);
+    record("scroll", "页面滚动", scrollResult.canScroll && scrollResult.didScroll, !scrollResult.canScroll ? "当前页面没有可滚动内容" : scrollResult.didScroll ? `页面已产生滚动位移（${scrollResult.method === "wheel" ? "滚轮" : "平滑滚动"}）` : "页面可滚动，但没有产生位移");
 
     bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => bodyText);
     const anchors = await page.locator("a[href]").evaluateAll((elements) => elements.map((element) => ({
@@ -372,26 +519,110 @@ async function verifyPlatform(platform) {
   }
 }
 
-async function extractPublicMetadata(page, fallbackAuthor) {
-  const candidates = await page.locator("[data-e2e*='author'], [data-e2e*='user'], [class*='author'], [class*='nickname'], [class*='user-name'], a[href*='/user/'], a[href*='/people/'], a[href*='/profile/']").evaluateAll((elements) => elements.map((element) => ({
+async function extractPublicMetadata(page, fallbackAuthor, fallbackPublishedAt = "", fallbackAuthorId = "") {
+  const candidates = await page.locator(".AuthorInfo-name, .UserLink-link, [itemprop='author'], [data-e2e*='author'], [class*='AuthorInfo'], a[href*='/people/']").evaluateAll((elements) => elements.map((element) => ({
     text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
     href: element instanceof HTMLAnchorElement ? element.href : String(element.closest("a")?.href || ""),
   })).filter((item) => item.text.length >= 2 && item.text.length <= 80).slice(0, 20)).catch(() => []);
-  const authorCandidate = candidates[0];
-  let authorId = "";
+  const authorCandidate = candidates.find((candidate) => /\/people\//.test(candidate.href)) ?? candidates[0];
+  let authorId = fallbackAuthorId;
   try { authorId = new URL(authorCandidate?.href || "").pathname.split("/").filter(Boolean).at(-1) || ""; } catch { /* not exposed */ }
-  const timeTexts = await page.locator("time, [datetime], [class*='time'], [class*='date'], [data-e2e*='time']").evaluateAll((elements) => elements.map((element) => String(element.getAttribute("datetime") || element.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20)).catch(() => []);
+  const metaDates = await page.locator("meta[itemprop='datePublished'], meta[property='article:published_time'], meta[name='date']").evaluateAll((elements) => elements.map((element) => String(element.getAttribute("content") || "").trim()).filter(Boolean)).catch(() => []);
+  const timeTexts = await page.locator("time, [datetime], [data-tooltip*='发布于'], .ContentItem-time, .Post-Header time").evaluateAll((elements) => elements.map((element) => String(element.getAttribute("datetime") || element.getAttribute("data-tooltip") || element.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20)).catch(() => []);
   const bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
   const timePattern = /(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?|\d{1,2}[-/.月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?|\d+\s*(?:分钟前|小时前|天前))/;
-  const publishedAt = timeTexts.find((value) => timePattern.test(value))?.match(timePattern)?.[0] || bodyText.match(timePattern)?.[0] || "未公开";
+  const publishedAt = metaDates[0] || timeTexts.find((value) => timePattern.test(value))?.match(timePattern)?.[0] || bodyText.match(timePattern)?.[0] || fallbackPublishedAt || "未公开";
   return { author: authorCandidate?.text || fallbackAuthor || "公开用户", authorId, publishedAt };
+}
+
+async function extractDetailContent(page) {
+  const title = await page.locator("h1.Post-Title, h1.QuestionHeader-title, h1").first().innerText({ timeout: 3000 }).catch(() => "");
+  const selectors = [".Post-RichTextContainer", ".QuestionAnswer-content", ".RichContent-inner", ".RichText.ztext", "article"];
+  let body = "";
+  for (const selector of selectors) {
+    const texts = await page.locator(selector).allTextContents().catch(() => []);
+    const candidate = texts.map((text) => String(text).replace(/\s+/g, " ").trim()).sort((a, b) => b.length - a.length)[0] || "";
+    if (candidate.length > body.length) body = candidate;
+    if (body.length >= 300) break;
+  }
+  if (!body) body = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+  return `${title.trim()}\n${body.trim()}`.replace(/\s+/g, " ").trim().slice(0, 20_000);
+}
+
+async function readDetailProgressively(page, { job, position, pendingTrace, results, analysisTrace }) {
+  const detailState = await page.evaluate(() => {
+    const selectors = [".Post-RichTextContainer", ".QuestionAnswer-content", ".RichContent-inner", ".RichText.ztext", "article"];
+    const candidates = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+    const detail = candidates.sort((left, right) => (right.scrollHeight || right.textContent?.length || 0) - (left.scrollHeight || left.textContent?.length || 0))[0];
+    if (!detail) return { found: false, steps: 1 };
+    detail.setAttribute("data-xintan-detail", "1");
+    detail.style.outline = "3px solid #635bff";
+    detail.style.outlineOffset = "6px";
+    const viewport = Math.max(320, window.innerHeight * 0.62);
+    return { found: true, steps: Math.max(1, Math.min(10, Math.ceil(detail.getBoundingClientRect().height / viewport))) };
+  }).catch(() => ({ found: false, steps: 1 }));
+
+  for (let step = 0; step < detailState.steps; step += 1) {
+    if (page.isClosed()) throw new Error("阅读正文时操作窗口被关闭");
+    const current = step + 1;
+    await page.locator("[data-xintan-detail='1']").first().evaluate((element, progress) => {
+      const rect = element.getBoundingClientRect();
+      const start = window.scrollY + rect.top;
+      const viewport = Math.max(320, window.innerHeight * 0.62);
+      window.scrollTo({ top: Math.max(0, start + (progress - 1) * viewport - 96), behavior: "smooth" });
+      let overlay = document.querySelector("#xintan-analysis-overlay");
+      if (!overlay) {
+        overlay = document.createElement("aside");
+        overlay.id = "xintan-analysis-overlay";
+        Object.assign(overlay.style, { position: "fixed", top: "18px", right: "18px", zIndex: "2147483647", width: "330px", padding: "16px", borderRadius: "12px", background: "rgba(16,18,24,.96)", color: "white", boxShadow: "0 18px 60px rgba(0,0,0,.34)", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" });
+        document.documentElement.appendChild(overlay);
+      }
+      overlay.textContent = "";
+      const heading = document.createElement("strong");
+      heading.textContent = "芯探 · 正文深读";
+      Object.assign(heading.style, { display: "block", color: "#aaa7ff", fontSize: "13px", marginBottom: "10px" });
+      const status = document.createElement("div");
+      status.textContent = `正在逐段阅读 ${progress.current}/${progress.total}`;
+      Object.assign(status.style, { fontSize: "15px", fontWeight: "700", marginBottom: "8px" });
+      const note = document.createElement("p");
+      note.textContent = "阅读当前可见段落并提取事实、时间和求职/企业信号";
+      Object.assign(note.style, { margin: "0", color: "#d7d9e0", fontSize: "12px", lineHeight: "1.6" });
+      overlay.append(heading, status, note);
+    }, { current, total: detailState.steps }).catch(() => undefined);
+    searchJobs.set(job.jobId, {
+      ...job, status: "running", phase: "reading_detail", fetched: results.length,
+      inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
+      currentAction: `第 ${position}/${job.targetItems} 条：逐段阅读正文 ${current}/${detailState.steps}`,
+      currentItem: { ...pendingTrace, status: "reading_detail", detailRead: current, detailTarget: detailState.steps, reason: "正在逐段滚动阅读正文，尚未形成最终结论" },
+      analysisTrace: [...analysisTrace],
+    });
+    await delay(650);
+  }
+  return detailState;
+}
+
+async function expandZhihuComments(page) {
+  const triggers = page.locator("button:has-text('查看全部'), button:has-text('展开评论'), button:has-text('查看评论'), button:has-text('条评论'), a:has-text('查看全部评论')");
+  const count = await triggers.count().catch(() => 0);
+  for (let index = 0; index < Math.min(3, count); index += 1) {
+    const trigger = triggers.nth(index);
+    if (await trigger.isVisible().catch(() => false)) {
+      await trigger.click({ timeout: 3000 }).catch(() => undefined);
+      await page.waitForTimeout(900);
+      break;
+    }
+  }
 }
 
 async function readCommentsProgressively(page, { job, position, target, pendingTrace, results, analysisTrace }) {
   const comments = [];
   const seen = new Set();
+  if (job.platform === "知乎") await expandZhihuComments(page);
   for (let round = 0; round < 8 && comments.length < target; round += 1) {
-    const visible = await page.locator("[class*='comment'], [id*='comment'], [aria-label*='评论'], [data-e2e*='comment']").evaluateAll((elements, roundIndex) => elements.map((element, index) => {
+    const commentSelector = job.platform === "知乎"
+      ? ".CommentItem, .CommentContent, [class*='CommentItem'], [class*='NestComment']"
+      : "[class*='comment'], [id*='comment'], [aria-label*='评论'], [data-e2e*='comment']";
+    const visible = await page.locator(commentSelector).evaluateAll((elements, roundIndex) => elements.map((element, index) => {
       const text = String(element.innerText || "").replace(/\s+/g, " ").trim();
       const marker = `xt-comment-${roundIndex}-${index}`;
       element.setAttribute("data-xintan-comment", marker);
@@ -402,7 +633,36 @@ async function readCommentsProgressively(page, { job, position, target, pendingT
       const key = comment.text.slice(0, 260);
       if (seen.has(key)) continue;
       seen.add(key); comments.push(comment.text.slice(0, 600)); added += 1;
-      await page.locator(`[data-xintan-comment="${comment.marker}"]`).first().scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
+      const currentComment = page.locator(`[data-xintan-comment="${comment.marker}"]`).first();
+      await currentComment.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
+      await currentComment.evaluate((element, progress) => {
+        document.querySelectorAll("[data-xintan-comment-active='1']").forEach((active) => {
+          active.removeAttribute("data-xintan-comment-active");
+          active.style.outline = "";
+          active.style.outlineOffset = "";
+        });
+        element.setAttribute("data-xintan-comment-active", "1");
+        element.style.outline = "3px solid #635bff";
+        element.style.outlineOffset = "4px";
+        let overlay = document.querySelector("#xintan-analysis-overlay");
+        if (!overlay) {
+          overlay = document.createElement("aside");
+          overlay.id = "xintan-analysis-overlay";
+          Object.assign(overlay.style, { position: "fixed", top: "18px", right: "18px", zIndex: "2147483647", width: "330px", padding: "16px", borderRadius: "12px", background: "rgba(16,18,24,.96)", color: "white", boxShadow: "0 18px 60px rgba(0,0,0,.34)", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" });
+          document.documentElement.appendChild(overlay);
+        }
+        overlay.textContent = "";
+        const heading = document.createElement("strong");
+        heading.textContent = "芯探 · 评论深读";
+        Object.assign(heading.style, { display: "block", color: "#aaa7ff", fontSize: "13px", marginBottom: "10px" });
+        const status = document.createElement("div");
+        status.textContent = `正在阅读第 ${progress.index}/${progress.target} 条公开评论`;
+        Object.assign(status.style, { fontSize: "15px", fontWeight: "700", marginBottom: "8px" });
+        const note = document.createElement("p");
+        note.textContent = progress.preview;
+        Object.assign(note.style, { margin: "0", color: "#d7d9e0", fontSize: "12px", lineHeight: "1.6" });
+        overlay.append(heading, status, note);
+      }, { index: comments.length, target, preview: comment.text.slice(0, 180) }).catch(() => undefined);
       searchJobs.set(job.jobId, {
         ...job, status: "running", phase: "reading_comments", fetched: results.length,
         inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
@@ -410,29 +670,71 @@ async function readCommentsProgressively(page, { job, position, target, pendingT
         currentItem: { ...pendingTrace, status: "reading_comments", commentRead: comments.length, commentTarget: target, commentPreview: comment.text.slice(0, 180), reason: "正在逐条阅读评论，尚未形成最终结论" },
         analysisTrace: [...analysisTrace],
       });
-      await page.waitForTimeout(220);
+      await delay(700);
       if (comments.length >= target) break;
     }
     if (comments.length >= target) break;
-    await page.mouse.wheel(0, 520).catch(() => undefined);
-    await page.waitForTimeout(added ? 650 : 900);
+    await scrollPageVisibly(page, 520);
+    await delay(added ? 750 : 950);
     if (!added && round >= 2) break;
   }
   return comments;
 }
 
+async function readRankedZhihuSearchResults(page) {
+  return page.evaluate(async () => {
+    const resource = performance.getEntriesByType("resource").map((entry) => entry.name).reverse()
+      .find((url) => url.includes("/api/v4/search_v3"));
+    if (!resource) return [];
+    const response = await fetch(resource, { credentials: "include" });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    const strip = (value) => {
+      const holder = document.createElement("div");
+      holder.innerHTML = String(value || "");
+      return String(holder.textContent || "").replace(/\s+/g, " ").trim();
+    };
+    return (Array.isArray(payload.data) ? payload.data : []).map((entry, index) => {
+      const object = entry?.object;
+      if (!object || entry.type !== "search_result") return null;
+      let url = "";
+      if (object.type === "article" && object.id) url = `https://zhuanlan.zhihu.com/p/${object.id}`;
+      else if (object.type === "answer" && object.id && object.question?.id) url = `https://www.zhihu.com/question/${object.question.id}/answer/${object.id}`;
+      else if (object.type === "question" && object.id) url = `https://www.zhihu.com/question/${object.id}`;
+      if (!url) return null;
+      const timestamp = Number(object.created_time || object.updated_time || 0);
+      const title = strip(object.title || object.question?.name || "");
+      const excerpt = strip(object.excerpt || object.description || object.content || "");
+      return {
+        marker: `api-${index}`, url, title: strip(object.author?.name || title || "公开用户"),
+        snippet: `${title} ${excerpt}`.trim().slice(0, 780),
+        publishedHint: timestamp > 0 ? new Date(timestamp * 1000).toISOString() : "",
+        authorHint: strip(object.author?.name || ""), authorIdHint: String(object.author?.url_token || ""),
+      };
+    }).filter(Boolean);
+  }).catch(() => []);
+}
+
 async function processSearchJob(job, queries) {
   try {
     const searchPlan = buildSearchPlan(job, queries);
+    job.searchPlan = searchPlan.map((query) => query.join(" "));
+    job.prefiltered = 0;
     let queryCursor = 0;
     let activeQuery = searchPlan[queryCursor];
-    const page = await openControlledPage(searchUrl(job.platform, activeQuery));
+    let page = await openControlledPage(searchUrl(job.platform, activeQuery));
     await prepareSearchPage(page, job.platform, activeQuery);
     searchJobs.set(job.jobId, { ...job, status: "running", phase: "locating", progress: 20, currentAction: `正在${job.platform}核对检索词：${activeQuery.join("、")}`, analysisTrace: [], searchPlan: searchPlan.map((query) => query.join(" ")) });
-    await page.waitForTimeout(2200);
+    await delay(2200);
+    if (page.isClosed()) {
+      page = await openControlledPage(searchUrl(job.platform, activeQuery));
+      await prepareSearchPage(page, job.platform, activeQuery);
+      await delay(1400);
+    }
     const expectedHost = new URL(PLATFORM_URLS[job.platform]).hostname.replace(/^www\./, "");
     const seenUrls = new Set();
     const seenSnippets = new Set();
+    const prefilteredUrls = new Set();
     const results = [];
     const analysisTrace = [];
     const maxItems = Math.max(1, Math.min(50, Number(job.targetItems ?? aiSettings.policy.maxItemsPerSource ?? 10)));
@@ -441,26 +743,45 @@ async function processSearchJob(job, queries) {
     let pendingRefine = "";
     let anchorCount = 0;
     let emptyScreens = 0;
+    let inspectedForQuery = 0;
+    const perQueryQuota = Math.max(1, Math.min(2, Number(job.itemsPerQuery ?? 2)));
     const maxSearchScreens = Math.min(60, Math.max(12, maxItems * 3, searchPlan.length * 3));
     for (let screen = 0; screen < maxSearchScreens && analysisTrace.length < maxItems && agentSteps < Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2); screen += 1) {
-      const batch = await page.locator("a[href]").evaluateAll((elements, screenIndex) => elements.map((element, index) => {
+      if (page.isClosed()) {
+        page = await openControlledPage(searchUrl(job.platform, activeQuery));
+        await prepareSearchPage(page, job.platform, activeQuery);
+        await page.waitForTimeout(1400);
+      }
+      const rankedApiResults = await readRankedZhihuSearchResults(page);
+      const batch = rankedApiResults.length ? rankedApiResults : await page.locator("a[href]").evaluateAll((elements, screenIndex) => elements.map((element, index) => {
         const anchor = element;
         const container = anchor.closest("article, li, section, [role='listitem'], .pbw, .SearchResult-Card, [class*='SearchResult'], [class*='ContentItem'], [class*='note-item'], [class*='search-result'], [class*='feed-card']") || anchor;
         const snippet = String(container?.innerText || anchor.innerText || "").replace(/\s+/g, " ").trim();
         const marker = `xt-${screenIndex}-${index}`;
         anchor.setAttribute("data-xintan-candidate", marker);
-        return { marker, url: anchor.href, title: String(anchor.innerText || "").replace(/\s+/g, " ").trim(), snippet };
+        const timeElement = container?.querySelector(".ContentItem-time, time, [datetime], [data-tooltip*='发布于'], [data-tooltip*='编辑于']");
+        const publishedHint = String(timeElement?.getAttribute("datetime") || timeElement?.getAttribute("data-tooltip") || timeElement?.textContent || "").replace(/\s+/g, " ").trim();
+        return { marker, url: anchor.href, title: String(anchor.innerText || "").replace(/\s+/g, " ").trim(), snippet, publishedHint };
       }), screen).catch(() => []);
       anchorCount = Math.max(anchorCount, batch.length);
-      const candidates = batch.filter((item) => {
+      const rangeDays = Number(String(job.timeRange || "近30天").match(/\d+/)?.[0] ?? 30);
+      const candidates = batch.map((item) => ({ ...item, hintedDate: parseVisibleDate(item.publishedHint) })).sort((left, right) => {
+        if (left.hintedDate && right.hintedDate) return right.hintedDate.getTime() - left.hintedDate.getTime();
+        if (left.hintedDate) return -1;
+        if (right.hintedDate) return 1;
+        return 0;
+      }).filter((item) => {
         try {
           const parsed = new URL(item.url);
           const snippetKey = item.snippet.replace(/\s+/g, " ").trim().slice(0, 240);
           const boilerplate = /Powered by Discuz|ICP备|document\.createElement\(["']script|关于我们.*举报/i.test(item.snippet);
-          return parsed.hostname.replace(/^www\./, "").endsWith(expectedHost) && isContentUrl(job.platform, parsed) && !boilerplate
+          const tooOld = item.hintedDate && item.hintedDate.getTime() < Date.now() - rangeDays * 86_400_000;
+          if (tooOld) prefilteredUrls.add(parsed.toString());
+          return !tooOld && !prefilteredUrls.has(parsed.toString()) && parsed.hostname.replace(/^www\./, "").endsWith(expectedHost) && isContentUrl(job.platform, parsed) && !boilerplate
             && item.snippet.length >= 12 && item.snippet.length <= 800 && !seenUrls.has(parsed.toString()) && !seenSnippets.has(snippetKey);
         } catch { return false; }
-      }).slice(0, Math.max(0, maxItems - analysisTrace.length));
+      }).slice(0, Math.max(0, Math.min(maxItems - analysisTrace.length, perQueryQuota - inspectedForQuery)));
+      job.prefiltered = prefilteredUrls.size;
       if (candidates.length) emptyScreens = 0;
       else emptyScreens += 1;
       for (const candidate of candidates) {
@@ -469,27 +790,32 @@ async function processSearchJob(job, queries) {
         seenSnippets.add(candidate.snippet.replace(/\s+/g, " ").trim().slice(0, 240));
         const item = { ...candidate, platform: job.platform, snippet: candidate.snippet.slice(0, 800) };
         const position = analysisTrace.length + 1;
+        inspectedForQuery += 1;
         const projectedTotal = maxItems;
-        const pendingTrace = { index: position, url: parsed.toString(), snippet: item.snippet, author: candidate.title.slice(0, 60) || "公开用户", status: "opening_detail", decision: "待判断", reason: "电脑Agent正在打开详情并读取正文", tags: [], matchedKeywords: [], evidenceQuotes: [], detailExcerpt: "", intent: "无", intelligenceType: "待判断", score: 0, priority: "C", nextAction: "open_source", actionReason: "每条候选必须进入详情深读", confidence: 0, policyStatus: "正在校验站内详情地址", model: aiSettings.model };
+        const pendingTrace = { index: position, url: parsed.toString(), snippet: item.snippet, author: String(candidate.authorHint || candidate.title || "公开用户").slice(0, 60), authorId: String(candidate.authorIdHint || ""), publishedAt: candidate.publishedHint || "", status: "opening_detail", decision: "待判断", reason: "电脑Agent正在打开详情并读取正文", tags: [], matchedKeywords: [], evidenceQuotes: [], detailExcerpt: "", intent: "无", intelligenceType: "待判断", score: 0, priority: "C", nextAction: "open_source", actionReason: "每条候选必须进入详情深读", confidence: 0, policyStatus: "正在校验站内详情地址", model: aiSettings.model };
         searchJobs.set(job.jobId, {
           ...job, status: "running", phase: "opening_detail", progress: Math.min(88, 26 + position * 5), fetched: results.length,
           inspected: position, kept: results.length, filtered: analysisTrace.filter((entry) => entry.decision === "过滤").length,
-          currentAction: `正在打开第 ${position} 条详情：${pendingTrace.author}`,
+          currentAction: `已在搜索页预过滤 ${prefilteredUrls.size} 条旧内容；正在按时间优先打开第 ${position} 条详情：${pendingTrace.author}`,
           currentItem: pendingTrace, analysisTrace: [...analysisTrace, pendingTrace],
         });
+        try {
         await showItemAnalysis(page, item, { decision: "打开详情", priority: "-", score: 0, reason: "强制逐条进入站内原文，不使用列表摘要直接定案", keep: true }, position, projectedTotal, "reading");
+        await delay(700);
         const detailPolicy = enforceAgentPolicy({ nextAction: "open_source", decision: "needs_more" }, job, item);
         if (!detailPolicy.allowed) throw new Error(`详情打开被安全策略阻止：${detailPolicy.reason}`);
         const searchPageUrl = page.url();
         const searchScrollY = await page.evaluate(() => window.scrollY).catch(() => 0);
         await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-        await page.waitForTimeout(job.platform === "抖音" ? 2200 : 1400);
+        await page.waitForTimeout(1400);
         const landedUrl = page.url();
         const landedHost = new URL(landedUrl).hostname.replace(/^www\./, "");
         if (!landedHost.endsWith(expectedHost)) throw new Error("详情页跳转超出平台白名单域名");
-        const detailText = (await page.locator("body").innerText({ timeout: 6000 }).catch(() => "")).replace(/\s+/g, " ").trim();
-        const publicMeta = await extractPublicMetadata(page, pendingTrace.author);
+        await readDetailProgressively(page, { job, position, pendingTrace, results, analysisTrace });
+        const detailText = await extractDetailContent(page);
+        const publicMeta = await extractPublicMetadata(page, pendingTrace.author, pendingTrace.publishedAt, pendingTrace.authorId);
         const metadataTrace = { ...pendingTrace, author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt };
+        const hardFilter = hardFilterReasons(job, publicMeta, detailText);
         const visualFrames = [];
         const firstFrame = await page.screenshot({ type: "jpeg", quality: 45 }).catch(() => null);
         if (firstFrame) visualFrames.push(`data:image/jpeg;base64,${firstFrame.toString("base64")}`);
@@ -500,9 +826,9 @@ async function processSearchJob(job, queries) {
           const secondFrame = await page.screenshot({ type: "jpeg", quality: 45 }).catch(() => null);
           if (secondFrame) visualFrames.push(`data:image/jpeg;base64,${secondFrame.toString("base64")}`);
         }
-        const commentTexts = await readCommentsProgressively(page, { job: { ...job, targetItems: maxItems }, position, target: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), pendingTrace: metadataTrace, results, analysisTrace });
+        const commentTexts = hardFilter.reasons.length ? [] : await readCommentsProgressively(page, { job: { ...job, targetItems: maxItems }, position, target: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), pendingTrace: metadataTrace, results, analysisTrace });
         const detailExcerpt = detailText.slice(0, 520);
-        const readingTrace = { ...metadataTrace, status: "reading_detail", reason: "正在提取正文、公开评论和可回溯证据", detailExcerpt, policyStatus: "站内详情地址校验通过" };
+        const readingTrace = { ...metadataTrace, status: "reading_detail", reason: "正在提取正文、公开评论和可回溯证据", detailExcerpt, commentRead: commentTexts.length, commentTarget: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), policyStatus: "站内详情地址校验通过" };
         searchJobs.set(job.jobId, {
           ...job, status: "running", phase: "reading_detail", progress: Math.min(90, 28 + position * 5), fetched: results.length,
           inspected: position, kept: results.length, filtered: analysisTrace.length - results.length,
@@ -527,7 +853,14 @@ async function processSearchJob(job, queries) {
         });
         let aiFailure = "";
         let brainDecision;
-        try {
+        if (hardFilter.reasons.length) {
+          brainDecision = {
+            decision: "filter", reasoningSummary: hardFilter.reasons.join("；"), nextAction: "scroll_next",
+            actionReason: "硬过滤规则在AI判断前生效，继续处理下一候选", searchQuery: "", crossCheckPlatform: "",
+            tags: ["规则过滤"], matchedKeywords: hardFilter.excludeMatches, evidenceQuotes: [], intent: "无", intelligenceType: "无效内容",
+            score: 0, priority: "C", confidence: 1, stopReason: "命中时间或黑名单规则", model: "policy-engine", responseId: "",
+          };
+        } else try {
           brainDecision = await askAiBrainWithRetry(aiObservation);
         } catch (error) {
           aiFailure = error instanceof Error ? error.message : String(error);
@@ -581,6 +914,25 @@ async function processSearchJob(job, queries) {
           searchJobs.set(job.jobId, { ...job, status: "running", phase: "acting", progress: Math.min(92, 32 + position * 5), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `AI决定调整检索词：${pendingRefine}；原因：${brainDecision.actionReason}`, currentItem: finishedTrace, analysisTrace: [...analysisTrace] });
           break;
         }
+        } catch (itemError) {
+          const message = itemError instanceof Error ? itemError.message : String(itemError);
+          const recoveryTrace = {
+            ...pendingTrace, status: "completed", decision: "过滤", reason: `详情页读取异常，已跳过并自动恢复：${message.slice(0, 160)}`,
+            tags: ["页面异常"], matchedKeywords: [], evidenceQuotes: [], intent: "无", intelligenceType: "无效内容",
+            score: 0, priority: "C", nextAction: "reopen_search", actionReason: "单条页面故障不终止整轮任务",
+            confidence: 1, policyStatus: "自动恢复", model: "recovery-engine",
+          };
+          analysisTrace.push(recoveryTrace);
+          agentSteps += 1;
+          searchJobs.set(job.jobId, {
+            ...job, status: "running", phase: "recovering", progress: Math.min(90, 30 + position * 5), fetched: results.length,
+            inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length,
+            currentAction: `第 ${position} 条页面异常，正在重开知乎检索页并继续下一条`, currentItem: recoveryTrace, analysisTrace: [...analysisTrace],
+          });
+          page = await openControlledPage(searchUrl(job.platform, activeQuery));
+          await prepareSearchPage(page, job.platform, activeQuery);
+          await page.waitForTimeout(1400);
+        }
       }
       if (analysisTrace.length >= maxItems || agentSteps >= Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2)) break;
       if (pendingRefine) {
@@ -589,6 +941,18 @@ async function processSearchJob(job, queries) {
         await prepareSearchPage(page, job.platform, [pendingRefine]);
         await page.waitForTimeout(1600);
         pendingRefine = "";
+        emptyScreens = 0;
+        inspectedForQuery = 0;
+        continue;
+      }
+      if (inspectedForQuery >= perQueryQuota && queryCursor + 1 < searchPlan.length) {
+        queryCursor += 1;
+        activeQuery = searchPlan[queryCursor];
+        searchJobs.set(job.jobId, { ...job, status: "running", phase: "refining_search", progress: Math.min(88, 34 + analysisTrace.length * 5), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `本组已深读 ${inspectedForQuery} 条，轮换第 ${queryCursor + 1}/${searchPlan.length} 组：${activeQuery.join("、")}`, analysisTrace: [...analysisTrace] });
+        await page.goto(searchUrl(job.platform, activeQuery), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+        await prepareSearchPage(page, job.platform, activeQuery);
+        await page.waitForTimeout(1600);
+        inspectedForQuery = 0;
         emptyScreens = 0;
         continue;
       }
@@ -600,24 +964,26 @@ async function processSearchJob(job, queries) {
         await prepareSearchPage(page, job.platform, activeQuery);
         await page.waitForTimeout(1600);
         emptyScreens = 0;
+        inspectedForQuery = 0;
         continue;
       }
       if (emptyScreens >= 3 && queryCursor + 1 >= searchPlan.length) break;
       searchJobs.set(job.jobId, { ...job, status: "running", phase: "loading_more", progress: Math.min(86, 35 + analysisTrace.length * 4), fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, currentAction: `当前屏内容已分析，向下加载更多结果`, analysisTrace: [...analysisTrace] });
-      await page.mouse.wheel(0, Math.max(650, await page.evaluate(() => window.innerHeight * 0.78).catch(() => 700))).catch(() => undefined);
+      await scrollPageVisibly(page, Math.max(650, await page.evaluate(() => window.innerHeight * 0.78).catch(() => 700)));
       await page.waitForTimeout(1100);
     }
     const title = await page.title().catch(() => "");
-    const needsLogin = /登录|sign in|login/i.test(`${title} ${page.url()}`) && results.length === 0;
+    const finalPageUrl = page.isClosed() ? searchUrl(job.platform, activeQuery) : page.url();
+    const needsLogin = /登录|sign in|login/i.test(`${title} ${finalPageUrl}`) && results.length === 0;
     const targetReached = analysisTrace.length >= maxItems;
     const finalStatus = needsLogin ? "waiting_login" : targetReached ? "completed" : "partial";
     searchJobs.set(job.jobId, {
       ...job, status: finalStatus, phase: needsLogin ? "waiting_login" : targetReached ? "completed" : "partial", progress: 100,
-      fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length, results, analysisTrace,
+      fetched: results.length, inspected: analysisTrace.length, kept: results.length, filtered: analysisTrace.length - results.length + prefilteredUrls.size, prefiltered: prefilteredUrls.size, results, analysisTrace,
       currentItem: analysisTrace.at(-1),
       targetItems: maxItems,
-      currentAction: needsLogin ? `${job.platform}需要登录后继续` : targetReached ? `${job.platform}已按要求逐条深读 ${analysisTrace.length}/${maxItems} 条，保留 ${results.length} 条` : `${job.platform}仅完成 ${analysisTrace.length}/${maxItems} 条：当前检索页没有更多可打开内容，请调整关键词或登录状态`,
-      diagnostic: results.length ? undefined : { pageUrl: page.url(), pageTitle: title, anchorCount },
+      currentAction: needsLogin ? `${job.platform}需要登录后继续` : targetReached ? `${job.platform}已先过滤 ${prefilteredUrls.size} 条旧结果，再逐条深读 ${analysisTrace.length}/${maxItems} 条，保留 ${results.length} 条` : `${job.platform}仅完成 ${analysisTrace.length}/${maxItems} 条：搜索页已预过滤 ${prefilteredUrls.size} 条旧内容，当前没有更多近期候选`,
+      diagnostic: results.length ? undefined : { pageUrl: finalPageUrl, pageTitle: title, anchorCount },
       completedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -685,9 +1051,9 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "0.8.3",
+      version: "1.0.4-zhihu",
       operatorWindow: "direct",
-      capabilities: ["open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "central_ai_brain", "ai_retry", "ai_fail_soft", "policy_guard", "agent_loop", "per_source_targets", "multi_query_search_plan", "no_early_item_stop", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
+      capabilities: ["zhihu_only", "open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "official_search_metadata", "freshness_first", "background_scheduler", "central_ai_brain", "ai_retry", "ai_fail_soft", "policy_guard", "agent_loop", "query_rotation", "strict_time_filter", "blacklist_filter", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {
@@ -774,7 +1140,9 @@ const server = http.createServer(async (request, response) => {
     try {
       const { platform } = await readJson(request);
       if (!PLATFORM_URLS[String(platform)]) return json(response, 400, { error: "暂不支持该平台" });
-      const verification = await verifyPlatform(String(platform));
+      const verificationPromise = operationQueue.then(() => verifyPlatform(String(platform)));
+      operationQueue = verificationPromise.catch(() => undefined);
+      const verification = await verificationPromise;
       return json(response, verification.status === "passed" ? 200 : 422, { verification });
     } catch {
       return json(response, 400, { error: "功能验收请求格式不正确" });
@@ -784,32 +1152,23 @@ const server = http.createServer(async (request, response) => {
     try {
       if (aiSettings.status !== "connected" || !aiSettings.apiKey) return json(response, 409, { error: "请先在AI中枢配置模型并通过连接测试" });
       const payload = await readJson(request);
-      const platform = String(payload.platform ?? "");
-      const target = PLATFORM_URLS[platform];
-      if (!target) return json(response, 400, { error: "暂不支持该平台" });
-      const jobId = String(payload.jobId ?? `local-${Date.now()}`);
-      const queries = Array.isArray(payload.queries) ? payload.queries.map(String) : [];
-      const destination = searchUrl(platform, queries);
-      const needsLogin = SOCIAL_PLATFORMS.includes(platform) && sessionStates[platform]?.status !== "logged_in";
-      const job = {
-        jobId, platform, status: needsLogin ? "waiting_login" : "running", progress: 10,
-        currentAction: needsLogin ? `已打开${platform}，等待你完成登录` : `已在${platform}打开关键词检索`,
-        liveViewUrl: "", searchUrl: destination, createdAt: new Date().toISOString(),
-        taskName: String(payload.taskName ?? "猎头情报任务"), timeRange: String(payload.timeRange ?? "近30天"), queries,
-        targetItems: Math.max(1, Math.min(50, Number(payload.targetItems ?? 10))), commentTarget: Math.max(1, Math.min(50, Number(payload.commentTarget ?? 20))),
-        techKeywords: Array.isArray(payload.techKeywords) ? payload.techKeywords.map(String) : queries,
-        companyKeywords: Array.isArray(payload.companyKeywords) ? payload.companyKeywords.map(String) : [],
-        signalKeywords: Array.isArray(payload.signalKeywords) ? payload.signalKeywords.map(String) : [],
-        excludeKeywords: Array.isArray(payload.excludeKeywords) ? payload.excludeKeywords.map(String) : [],
-        phase: needsLogin ? "waiting_login" : "searching", inspected: 0, kept: 0, filtered: 0, analysisTrace: [],
-      };
-      searchJobs.set(jobId, job);
-      operationQueue = operationQueue.then(() => processSearchJob(job, queries));
+      if (String(payload.platform ?? "知乎") !== "知乎") return json(response, 400, { error: "当前版本只支持知乎" });
+      const job = buildSearchJob(payload);
+      searchJobs.set(job.jobId, job);
+      operationQueue = operationQueue.then(() => processSearchJob(job, job.queries));
       void operationQueue;
       return json(response, 202, job);
     } catch {
       return json(response, 400, { error: "任务格式不正确" });
     }
+  }
+  if (request.method === "GET" && url.pathname === "/v1/scheduler/status") {
+    return json(response, 200, { running: schedulerRunning, lastRunAt: schedulerLastRunAt, lastError: schedulerLastError, appBaseUrl: APP_BASE_URL });
+  }
+  if (request.method === "POST" && url.pathname === "/v1/scheduler/run-due") {
+    const payload = await readJson(request).catch(() => ({}));
+    const result = await runDueTasks({ force: payload.force === true, taskId: String(payload.taskId ?? "") });
+    return json(response, result.ok ? 200 : result.status === "busy" ? 409 : 500, result);
   }
   const jobMatch = url.pathname.match(/^\/v1\/search-tasks\/([^/]+)$/);
   if (request.method === "GET" && jobMatch) {
@@ -829,6 +1188,9 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   process.stdout.write(`芯探电脑助手已启动：http://${HOST}:${PORT}\n关闭此窗口会停止电脑连接。\n`);
 });
+
+const schedulerTimer = setInterval(() => { void runDueTasks(); }, 60_000);
+schedulerTimer.unref();
 
 async function shutdown() {
   await browserContext?.close().catch(() => undefined);

@@ -73,7 +73,7 @@ type Source = {
 type AnalysisTraceItem = {
   index: number; url: string; snippet: string; author: string; status: string;
   authorId?: string; publishedAt?: string;
-  decision: "保留" | "过滤" | "继续探索"; reason: string; tags: string[]; matchedKeywords: string[];
+  decision: "保留" | "过滤" | "继续探索" | "待判断"; reason: string; tags: string[]; matchedKeywords: string[];
   excludeMatches: string[]; intent: string; intelligenceType: string; score: number; priority: string;
   reasoningSummary?: string; nextAction?: string; actionReason?: string; confidence?: number;
   policyStatus?: string; model?: string; stopReason?: string; evidenceQuotes?: string[]; detailExcerpt?: string;
@@ -86,6 +86,7 @@ type LocalJob = {
   jobId: string; platform?: string; status: string; phase?: string; progress: number; fetched: number;
   inspected?: number; kept?: number; filtered?: number; currentAction: string; liveViewUrl: string;
   targetItems?: number; commentTarget?: number;
+  prefiltered?: number;
   currentItem?: AnalysisTraceItem; analysisTrace?: AnalysisTraceItem[]; results?: LocalResult[];
 };
 
@@ -129,15 +130,15 @@ type AiBrainSettings = {
 };
 
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
-const ALL_SOURCES = ["知乎", "EDA365", "微博", "小红书", "抖音"];
-const SOCIAL_SOURCES = ["抖音", "微博", "小红书", "知乎"];
-const DEFAULT_SOURCE_LIMITS: Record<string, number> = { 知乎: 15, EDA365: 15, 微博: 8, 小红书: 5, 抖音: 5 };
+const ALL_SOURCES = ["知乎"];
+const SOCIAL_SOURCES = ["知乎"];
+const DEFAULT_SOURCE_LIMITS: Record<string, number> = { 知乎: 10 };
 
 const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
-  { id: "overview", label: "工作台", icon: "HM" },
-  { id: "tasks", label: "检索任务", icon: "TS" },
-  { id: "leads", label: "线索结果", icon: "LD" },
-  { id: "settings", label: "设置", icon: "ST" },
+  { id: "overview", label: "总览", icon: "01" },
+  { id: "tasks", label: "检索", icon: "02" },
+  { id: "leads", label: "线索", icon: "03" },
+  { id: "settings", label: "设置", icon: "04" },
 ];
 
 function initials(name: string) {
@@ -167,6 +168,9 @@ export default function Home() {
   const [sourceFilter, setSourceFilter] = useState("全部来源");
   const [typeFilter, setTypeFilter] = useState("全部类型");
   const [priorityFilter, setPriorityFilter] = useState("全部优先级");
+  const [taskFilter, setTaskFilter] = useState("全部任务");
+  const [intentFilter, setIntentFilter] = useState("全部意向");
+  const [reviewFilter, setReviewFilter] = useState("全部状态");
 
   const loadState = async () => {
     try {
@@ -199,7 +203,7 @@ export default function Home() {
     window.sessionStorage.setItem("xintan-source-setup-complete", "1");
     setShowStartupSetup(false);
     setView("settings");
-    setToast("请按需逐个配置数据源");
+    setToast("请完成知乎登录与功能验收");
   }
 
   const filteredLeads = useMemo(() => {
@@ -212,9 +216,12 @@ export default function Home() {
       const matchesSource = sourceFilter === "全部来源" || lead.source === sourceFilter;
       const matchesType = typeFilter === "全部类型" || lead.intelligenceType === typeFilter;
       const matchesPriority = priorityFilter === "全部优先级" || lead.priority === priorityFilter;
-      return matchesQuery && matchesSource && matchesType && matchesPriority;
+      const matchesTask = taskFilter === "全部任务" || lead.taskId === taskFilter;
+      const matchesIntent = intentFilter === "全部意向" || lead.intent === intentFilter;
+      const matchesReview = reviewFilter === "全部状态" || lead.reviewStatus === reviewFilter;
+      return matchesQuery && matchesSource && matchesType && matchesPriority && matchesTask && matchesIntent && matchesReview;
     });
-  }, [data.leads, query, sourceFilter, typeFilter, priorityFilter]);
+  }, [data.leads, query, sourceFilter, typeFilter, priorityFilter, taskFilter, intentFilter, reviewFilter]);
 
   const totals = useMemo(() => {
     const fetched = data.runs.reduce((sum, run) => sum + safeNumber(run.fetched), 0);
@@ -267,7 +274,8 @@ export default function Home() {
             body: JSON.stringify({
               jobId, taskId: task.id, taskName: task.name, platform: source, queries,
               techKeywords: task.techKeywords, companyKeywords: task.companyKeywords,
-              signalKeywords: task.signalKeywords, excludeKeywords: task.excludeKeywords, timeRange: task.timeRange,
+              signalKeywords: task.signalKeywords, excludeKeywords: task.excludeKeywords, authorBlacklist: task.authorBlacklist,
+              companyBlacklist: task.companyBlacklist, timeRange: task.timeRange,
               targetItems: Math.max(1, Math.min(50, Number(task.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10))), commentTarget: 20,
             }),
           });
@@ -353,6 +361,9 @@ export default function Home() {
     if (sourceFilter !== "全部来源") params.set("source", sourceFilter);
     if (typeFilter !== "全部类型") params.set("type", typeFilter);
     if (priorityFilter !== "全部优先级") params.set("priority", priorityFilter);
+    if (taskFilter !== "全部任务") params.set("taskId", taskFilter);
+    if (intentFilter !== "全部意向") params.set("intent", intentFilter);
+    if (reviewFilter !== "全部状态") params.set("status", reviewFilter);
     window.location.href = `/api/export?${params.toString()}`;
     setToast(`正在生成 Excel，共 ${filteredLeads.length} 条线索`);
   }
@@ -382,8 +393,8 @@ export default function Home() {
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark">XT</div>
-          <div><strong>XINTAN</strong><span>TALENT INTELLIGENCE</span></div>
+          <div className="brand-mark">X</div>
+          <div><strong>XINTAN</strong><span>TALENT SIGNALS</span></div>
         </div>
         <nav aria-label="主导航">
           {NAV_ITEMS.map((item) => (
@@ -398,20 +409,20 @@ export default function Home() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className="system-pulse"><span />SYSTEM OPERATIONAL</div>
-          <p>Public-source intelligence</p>
-          <small>PRIVATE WORKSPACE · v0.4</small>
+          <div className="system-pulse"><span />All systems normal</div>
+          <p>Zhihu intelligence workspace</p>
+          <small>PRIVATE · v1.0</small>
         </div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">TALENT SIGNAL OPERATIONS</p>
+            <p className="eyebrow">XINTAN / TALENT SIGNALS</p>
             <h1>{NAV_ITEMS.find((item) => item.id === view)?.label}</h1>
           </div>
           <div className="top-actions">
-            <span className="workspace-badge"><i /> PRIVATE WORKSPACE</span>
+            <span className="workspace-badge"><i /> PRIVATE</span>
             <label className="global-search">
               <span>⌕</span>
               <input aria-label="全局搜索" placeholder="搜索线索、企业或技术栈" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -446,12 +457,19 @@ export default function Home() {
           {view === "leads" && (
             <LeadsView
               leads={filteredLeads}
+              tasks={data.tasks}
               sourceFilter={sourceFilter}
               setSourceFilter={setSourceFilter}
               typeFilter={typeFilter}
               setTypeFilter={setTypeFilter}
               priorityFilter={priorityFilter}
               setPriorityFilter={setPriorityFilter}
+              taskFilter={taskFilter}
+              setTaskFilter={setTaskFilter}
+              intentFilter={intentFilter}
+              setIntentFilter={setIntentFilter}
+              reviewFilter={reviewFilter}
+              setReviewFilter={setReviewFilter}
               onView={setSelectedLead}
               onExport={exportExcel}
             />
@@ -518,23 +536,23 @@ function Overview({
     <>
       <section className="overview-hero">
         <div className="overview-copy">
-          <p className="eyebrow">TALENT INTELLIGENCE</p>
-          <h2>Talent signals,<br /><em>clearly ranked.</em></h2>
-          <p>从 JD 出发，持续发现人才流动、团队扩张与项目变化。每条线索都保留来源和判断依据。</p>
-          <div className="hero-actions"><button className="primary-button" onClick={onCreate}>从 JD 创建任务</button><button className="ghost-button" onClick={() => onNavigate("leads")}>查看线索</button></div>
+          <p className="eyebrow">SIGNAL OPERATIONS</p>
+          <h2>Talent intelligence,<br /><em>without the noise.</em></h2>
+          <p>从公开内容中识别人才流动与组织变化。先过滤噪音，再逐条深读，并保留每一个判断的原始证据。</p>
+          <div className="hero-actions"><button className="primary-button" onClick={onCreate}>Create search</button><button className="ghost-button" onClick={() => onNavigate("leads")}>View signals</button></div>
         </div>
         <div className="overview-status">
-          <button onClick={() => onNavigate("tasks")}><span>Active tasks</span><strong>{activeTasks}</strong><small>持续运行的检索任务</small></button>
-          <button onClick={() => onNavigate("settings")}><span>Sources</span><strong>{data.sources.length}</strong><small>数据源与AI统一在设置中管理</small></button>
+          <button onClick={() => onNavigate("tasks")}><span>Active searches</span><strong>{activeTasks}</strong><small>正在运行的检索任务</small></button>
+          <button onClick={() => onNavigate("settings")}><span>Connected sources</span><strong>{data.sources.length}</strong><small>知乎与 AI 连接状态</small></button>
           <button onClick={() => onNavigate("leads")}><span>Review queue</span><strong>{pendingLeads}</strong><small>等待人工确认的线索</small></button>
         </div>
       </section>
 
       <section className="metric-grid">
-        <Metric label="累计分析内容" value={totals.fetched.toLocaleString()} delta="跨5个来源" tone="ink" />
-        <Metric label="有效情报线索" value={totals.valid.toLocaleString()} delta="过滤后结果" tone="green" />
-        <Metric label="A级高价值" value={String(totals.high)} delta="建议优先处理" tone="orange" />
-        <Metric label="人工已确认" value={String(totals.confirmed)} delta="反馈用于优化" tone="blue" />
+        <Metric label="Items reviewed" value={totals.fetched.toLocaleString()} delta="知乎详情深读数量" tone="ink" />
+        <Metric label="Qualified signals" value={totals.valid.toLocaleString()} delta="过滤后有效线索" tone="green" />
+        <Metric label="High priority" value={String(totals.high)} delta="A级优先处理" tone="orange" />
+        <Metric label="Confirmed" value={String(totals.confirmed)} delta="人工确认结果" tone="blue" />
       </section>
 
       <section className="two-column-grid">
@@ -548,6 +566,7 @@ function Overview({
                 <span className="score-pill">{lead.score}</span>
               </button>
             ))}
+            {data.leads.length === 0 && <div className="signal-empty"><strong>No qualified signals yet</strong><span>运行一次检索后，通过证据校验的内容会出现在这里。</span><button onClick={() => onNavigate("tasks")}>Go to searches →</button></div>}
           </div>
         </div>
 
@@ -574,27 +593,25 @@ function Metric({ label, value, delta, tone }: { label: string; value: string; d
 
 function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; running: boolean }) {
   const sources = Object.keys(jobs);
-  const activeSource = sources.find((source) => jobs[source].phase === "analyzing") ?? sources.find((source) => jobs[source].status === "running") ?? sources[0] ?? "";
+  const activeSource = sources.find((source) => ["calling_ai", "analyzing", "reading_comments", "reading_detail"].includes(jobs[source].phase ?? "")) ?? sources.find((source) => jobs[source].status === "running") ?? sources[0] ?? "";
   const [selectedSource, setSelectedSource] = useState("");
   const source = selectedSource && jobs[selectedSource] ? selectedSource : activeSource;
   const job = jobs[source];
   if (!job) return null;
   const trace = job.analysisTrace ?? [];
   const current = job.currentItem ?? trace.at(-1);
-  const phaseOrder = ["searching", "locating", "opening_detail", "reading_detail", "analyzing", "loading_more", "completed"];
-  const currentPhase = job.phase === "loading_more" ? "analyzing" : job.phase ?? "searching";
-  const phaseIndex = currentPhase === "waiting_login" ? 0 : Math.max(0, phaseOrder.indexOf(currentPhase));
+  const phaseIndex = ({ searching: 0, refining_search: 0, recovering: 0, locating: 1, opening_detail: 2, reading_detail: 3, reading_comments: 3, calling_ai: 4, analyzing: 4, loading_more: 4, completed: 4, partial: 4 } as Record<string, number>)[job.phase ?? "searching"] ?? 0;
   return (
     <section className="analysis-workspace" aria-live="polite">
       <div className="analysis-head">
-        <div><p className="eyebrow">LIVE DEEP-READ AUDIT</p><h3>每一条都打开详情深读</h3><span>列表只负责发现候选；电脑会逐条进入原文，读取正文与公开评论，再由AI形成结论。</span></div>
+        <div><p className="eyebrow">LIVE ANALYSIS</p><h3>Evidence-first review</h3><span>候选内容必须进入原文，读取正文与公开评论后，AI 才会形成结论。</span></div>
         <div className={`analysis-running-state ${running ? "active" : "complete"}`}><i />{running ? "分析进行中" : "本轮分析记录"}</div>
       </div>
       <div className="analysis-source-tabs" role="tablist" aria-label="平台分析记录">
         {sources.map((name) => {
           const item = jobs[name];
           return <button className={name === source ? "active" : ""} role="tab" aria-selected={name === source} key={name} onClick={() => setSelectedSource(name)}>
-            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "达标" : item.status === "partial" ? "未达条数" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "opening_detail" ? "打开详情" : item.phase === "reading_comments" ? "逐条读评论" : item.phase === "reading_detail" ? "深读原文" : item.phase === "analyzing" ? "AI判断" : "准备中"}</small>
+            <span>{initials(name)}</span><b>{name}</b><small>{item.status === "completed" ? "达标" : item.status === "partial" ? "未达条数" : item.status === "failed" ? "失败" : item.status === "waiting_login" ? "待登录" : item.phase === "opening_detail" ? "打开详情" : item.phase === "reading_comments" ? "逐条读评论" : item.phase === "reading_detail" ? "深读原文" : item.phase === "calling_ai" || item.phase === "analyzing" ? "AI判断" : item.phase === "refining_search" ? "调整检索" : item.phase === "recovering" ? "自动恢复" : "准备中"}</small>
           </button>;
         })}
       </div>
@@ -603,6 +620,7 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
       </div>
       <div className="analysis-summary">
         <span><small>当前动作</small><strong>{job.currentAction}</strong></span>
+        <span><small>搜索页旧内容预过滤</small><strong>{safeNumber(job.prefiltered)}</strong></span>
         <span><small>深读进度</small><strong>{safeNumber(job.inspected)}/{safeNumber(job.targetItems || job.inspected)}</strong></span>
         <span><small>保留</small><strong className="keep">{safeNumber(job.kept ?? job.fetched)}</strong></span>
         <span><small>过滤</small><strong className="drop">{safeNumber(job.filtered)}</strong></span>
@@ -655,7 +673,7 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
 }) {
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">SEARCH MISSIONS</p><h2>把每个JD变成持续运转的情报任务</h2><p>配置技术栈、目标企业、求职信号、时间范围和排除规则。</p></div><button className="primary-button" onClick={onCreate}>＋ 新建检索任务</button></div>
+      <div className="section-intro"><div><p className="eyebrow">SEARCHES</p><h2>Search missions</h2><p>从 JD 建立持续检索，配置技术栈、企业、求职信号、时间范围和排除规则。</p></div><button className="primary-button" onClick={onCreate}>New search</button></div>
       {(runningTask || Object.keys(liveJobs).length > 0) && <AnalysisWorkspace jobs={liveJobs} running={Boolean(runningTask)} />}
       <div className="task-grid">
         {tasks.map((task) => (
@@ -663,11 +681,11 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
             <div className="task-top"><span className={task.status === "active" ? "status-badge active" : "status-badge paused"}>{task.status === "active" ? "运行中" : "已暂停"}</span><div className="task-actions"><button className="more-button" onClick={() => onEdit(task)}>编辑</button><button className="more-button" onClick={() => onToggle(task)}>{task.status === "active" ? "暂停" : "恢复"}</button><button className="more-button danger" onClick={() => onDelete(task)}>删除</button></div></div>
             <h3>{task.name}</h3><p className="task-jd">{task.jd}</p>
             <div className="tag-row">{task.techKeywords.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
-            <div className="source-depth-summary">{task.sources.map((source) => <span key={source}>{source} <b>{task.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10}</b>条</span>)}</div>
+            <div className="source-depth-summary">{task.sources.map((source) => <span key={source}>{source} <b>{task.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10}</b>条</span>)}<span>最新优先</span></div>
             <div className="task-meta"><span>来源 <b>{task.sources.length}</b></span><span>线索 <b>{task.discovered}</b></span><span>A级 <b>{task.highValue}</b></span></div>
             <div className="task-schedule"><span>↻ {task.schedule}</span><span>{task.timeRange}</span></div>
             {runningTask === task.id && <div className="progress-track"><span style={{ width: `${runProgress}%` }} /></div>}
-            <button className="run-button" disabled={Boolean(runningTask) || task.status !== "active"} onClick={() => onRun(task)}>{runningTask === task.id ? `正在扫描 ${runProgress}%` : task.status === "active" ? "立即增量扫描" : "恢复后运行"}</button>
+            <button className="run-button" disabled={Boolean(runningTask) || task.status !== "active"} onClick={() => onRun(task)}>{runningTask === task.id ? `Running ${runProgress}%` : task.status === "active" ? "Run now" : "Resume to run"}</button>
           </article>
         ))}
       </div>
@@ -675,27 +693,37 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
   );
 }
 
-function LeadsView({ leads, sourceFilter, setSourceFilter, typeFilter, setTypeFilter, priorityFilter, setPriorityFilter, onView, onExport }: {
+function LeadsView({ leads, tasks, sourceFilter, setSourceFilter, typeFilter, setTypeFilter, priorityFilter, setPriorityFilter, taskFilter, setTaskFilter, intentFilter, setIntentFilter, reviewFilter, setReviewFilter, onView, onExport }: {
   leads: Lead[];
+  tasks: Task[];
   sourceFilter: string;
   setSourceFilter: (value: string) => void;
   typeFilter: string;
   setTypeFilter: (value: string) => void;
   priorityFilter: string;
   setPriorityFilter: (value: string) => void;
+  taskFilter: string;
+  setTaskFilter: (value: string) => void;
+  intentFilter: string;
+  setIntentFilter: (value: string) => void;
+  reviewFilter: string;
+  setReviewFilter: (value: string) => void;
   onView: (lead: Lead) => void;
   onExport: () => void;
 }) {
   return (
     <section className="panel table-panel">
       <div className="table-header">
-        <div><p className="eyebrow">EVIDENCE INBOX</p><h2>线索工作台</h2><span>所有AI判断均附带公开原文证据</span></div>
-        <button className="primary-button" onClick={onExport}>⇩ 导出Excel</button>
+        <div><p className="eyebrow">SIGNALS</p><h2>Signal inbox</h2><span>每一条 AI 判断都附带公开原文证据</span></div>
+        <button className="primary-button" onClick={onExport}>Export Excel</button>
       </div>
       <div className="filter-bar">
-        <select aria-label="来源筛选" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}><option>全部来源</option>{ALL_SOURCES.map((source) => <option key={source}>{source}</option>)}</select>
+        <select aria-label="任务筛选" value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}><option>全部任务</option>{tasks.map((task) => <option value={task.id} key={task.id}>{task.name}</option>)}</select>
+        <select aria-label="来源筛选" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}><option>全部来源</option><option>知乎</option></select>
         <select aria-label="类型筛选" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option>全部类型</option><option>人才线索</option><option>企业情报</option></select>
+        <select aria-label="求职意向筛选" value={intentFilter} onChange={(event) => setIntentFilter(event.target.value)}><option>全部意向</option><option>强</option><option>中</option><option>无</option></select>
         <select aria-label="优先级筛选" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option>全部优先级</option><option>A</option><option>B</option><option>C</option></select>
+        <select aria-label="处理状态筛选" value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value)}><option>全部状态</option><option>待审核</option><option>已确认</option><option>误报</option></select>
         <span className="filter-count">找到 {leads.length} 条结果</span>
       </div>
       <div className="lead-table-wrap">
@@ -715,7 +743,7 @@ function LeadsView({ leads, sourceFilter, setSourceFilter, typeFilter, setTypeFi
             ))}
           </tbody>
         </table>
-        {leads.length === 0 && <div className="empty-state"><strong>没有匹配的线索</strong><span>调整筛选条件或全局搜索词后再试。</span></div>}
+        {leads.length === 0 && <div className="empty-state"><strong>No signals found</strong><span>调整筛选条件，或运行一次新的检索任务。</span></div>}
       </div>
     </section>
   );
@@ -766,7 +794,7 @@ function AiBrainView() {
     try {
       const save = await fetch(`${LOCAL_ASSISTANT_URL}/v1/ai-settings`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "openai", baseUrl, model, apiKey, policy: { maxStepsPerSource: maxSteps, maxItemsPerSource: maxItems, allowOpenDetail: true, allowReadComments: true, allowRefineSearch: true, allowCrossPlatformSuggestion: true } }),
+        body: JSON.stringify({ provider: "openai", baseUrl, model, apiKey, policy: { maxStepsPerSource: maxSteps, maxItemsPerSource: maxItems, allowOpenDetail: true, allowReadComments: true, allowRefineSearch: true, allowCrossPlatformSuggestion: false } }),
       });
       const saved = await save.json() as AiBrainSettings & { error?: string };
       if (!save.ok) throw new Error(saved.error ?? "配置保存失败");
@@ -798,7 +826,7 @@ function AiBrainView() {
       </section>
       <section className="brain-policy-card">
         <div className="brain-card-head"><div><p className="eyebrow">ENFORCED POLICY</p><h3>电脑 Agent 规范</h3></div><span>默认拒绝越权</span></div>
-        <div className="policy-column allow"><b>允许自动执行</b>{(settings?.allowedActions ?? ["检索", "滚动", "读取公开内容", "打开站内原文", "读取公开评论", "调整关键词", "建议跨平台核验", "返回"]).map((action) => <span key={action}><i>✓</i>{action}</span>)}</div>
+        <div className="policy-column allow"><b>允许自动执行</b>{(settings?.allowedActions ?? ["检索", "滚动", "读取公开内容", "打开知乎原文", "读取公开评论", "调整关键词", "返回"]).map((action) => <span key={action}><i>✓</i>{action}</span>)}</div>
         <div className="policy-column block"><b>禁止自动执行</b>{(settings?.blockedActions ?? ["私信", "评论或发布", "点赞关注", "上传下载", "输入密码或验证码", "绕过人机验证", "访问非白名单域名"]).map((action) => <span key={action}><i>×</i>{action}</span>)}</div>
       </section>
     </div>
@@ -810,7 +838,7 @@ function SettingsView({ data, onChanged }: { data: AppState; onChanged: () => Pr
   const [section, setSection] = useState<"sources" | "ai">("sources");
   return <section className="settings-hub">
     <div className="settings-hub-head">
-      <div><p className="eyebrow">SYSTEM SETUP</p><h2>一次设置，持续运行</h2><span>先登录需要的平台，再连接 AI 中枢；其余高级信息默认收起。</span></div>
+      <div><p className="eyebrow">CONFIGURATION</p><h2>System setup</h2><span>连接知乎与 AI 中枢；检索、深读和增量去重由系统自动完成。</span></div>
       <div className="settings-hub-tabs" role="tablist" aria-label="设置分类">
         <button className={section === "sources" ? "active" : ""} role="tab" aria-selected={section === "sources"} onClick={() => setSection("sources")}>数据源</button>
         <button className={section === "ai" ? "active" : ""} role="tab" aria-selected={section === "ai"} onClick={() => setSection("ai")}>AI 中枢</button>
@@ -822,7 +850,7 @@ function SettingsView({ data, onChanged }: { data: AppState; onChanged: () => Pr
 }
 
 const EMPTY_CONNECTOR_SETTINGS: ConnectorSettingsState = {
-  endpoint: "http://127.0.0.1:8765", hasToken: false, hasCallbackSecret: false, enabledSources: ["抖音", "微博", "小红书", "知乎"],
+  endpoint: "http://127.0.0.1:8765", hasToken: false, hasCallbackSecret: false, enabledSources: ["知乎"],
   status: "not_configured", lastTestAt: null, lastError: "", liveViewUrl: "", capabilities: [],
 };
 const LOCAL_ASSISTANT_URL = "http://127.0.0.1:8765";
@@ -855,7 +883,7 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
       setConnectivity(connectivityResult.sources ?? []);
       setSessions(sessionResult.sessions ?? []);
       if (verificationResponse.ok) setVerifications(verificationResult.verifications ?? []);
-      setSessionMessage("五个数据源已完成检测");
+      setSessionMessage("知乎连接与登录状态已完成检测");
     } catch (error) { setSessionMessage(error instanceof Error ? error.message : "数据源检测失败"); }
     finally { setCheckingSources(false); }
   }, []);
@@ -952,13 +980,13 @@ function ConnectorSettingsPanel({ sources, onChanged, onConnectionChange }: { so
   const reachableCount = connectivity.filter((item) => item.reachable).length;
   return (
     <section className="settings-panel" id="connector-settings">
-      <div className="settings-head"><div><p className="eyebrow">CONNECTIONS</p><h3>数据源连接</h3><span>每个平台独立配置；账号和 Cookie 只保存在当前电脑。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测全部"}</button></div></div>
+      <div className="settings-head"><div><p className="eyebrow">ZHIHU CONNECTION</p><h3>知乎账号与浏览器</h3><span>账号和 Cookie 只保存在当前电脑，系统不会读取或保存密码。</span></div><div className="source-head-actions"><span className={`settings-status ${settings.status}`}>{statusLabel}</span><button className="ghost-button" disabled={testing || checkingSources} onClick={() => void (settings.status === "connected" ? refreshSources() : testConnection())}>{testing || checkingSources ? "检测中…" : "检测知乎"}</button></div></div>
       <div className="pair-card">
         <div className={`computer-illustration ${settings.status === "connected" ? "online" : ""}`}><span>XT</span><i /></div>
-        <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/5 个来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
+        <div className="pair-copy"><b>{settings.status === "connected" ? "Local assistant connected" : "Local assistant offline"}</b><p>{settings.status === "connected" ? `${reachableCount || 0}/1 个知乎来源已完成网络验证，账号状态见下方。` : "请启动芯探电脑助手；启动后页面会自动识别。"}</p></div>
         <div className="pair-actions">{settings.status === "connected" && <button className="ghost-button live-view-button" onClick={() => void showOperatorWindow()}>打开操作小窗</button>}<button className="primary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在检测…" : "重新连接"}</button></div>
       </div>
-      <div className="source-center-head"><div><b>5 Sources</b><span>网络连通与账号状态</span></div><small>账号数据仅保留在本机</small></div>
+      <div className="source-center-head"><div><b>Zhihu Source</b><span>网络、账号与功能验收</span></div><small>账号数据仅保留在本机</small></div>
       <div className="source-connection-grid">
         {sources.map((source) => {
           const check = connectivity.find((item) => item.name === source.name);
@@ -1011,7 +1039,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   }
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">DATA SOURCES</p><h2>连接与账号</h2><p>五个平台独立配置；配置完成后自动验收查找、滚动、内容读取和来源链接。</p></div></div>
+      <div className="section-intro"><div><p className="eyebrow">ZHIHU SOURCE</p><h2>知乎连接与账号</h2><p>登录一次并完成功能验收；系统会验证搜索、滚动、详情读取、评论读取和原始链接。</p></div></div>
       <ConnectorSettingsPanel sources={sources} onChanged={onChanged} onConnectionChange={setLocalConnected} />
       <section className="live-console">
         <div className="live-console-head"><div><p className="eyebrow">DIRECT BROWSER OPERATION</p><h3>独立操作窗口</h3><span>无需录屏。任务会直接打开一个小型浏览器窗口，AI 的搜索、点击、输入和滚动都在里面真实发生。</span></div><div className="live-controls"><button disabled={openingOperator || !localConnected} onClick={() => void showOperatorWindow()}>{openingOperator ? "正在打开…" : "唤起操作窗口"}</button>{liveJob && <span className={`job-state ${liveJob.status}`}>{liveJob.status === "running" ? "正在操作" : liveJob.status === "waiting_login" ? "等待登录" : liveJob.status === "failed" ? "失败" : "已派发"}</span>}</div></div>
@@ -1021,7 +1049,7 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
         </div> : <div className="live-empty"><strong>{waitingJobs ? "电脑助手尚未连接" : "当前没有正在执行的电脑任务"}</strong><span>{waitingJobs ? "启动本机助手后，任务会自动打开独立操作窗口。" : "运行任务后会自动弹出一个小型浏览器窗口，你可以直接观察全部操作。"}</span></div>}
       </section>
       {Object.keys(auditedJobs).length > 0 && <AnalysisWorkspace jobs={auditedJobs} running={false} />}
-      <div className="boundary-note"><b>DATA POLICY</b><span>只处理公开或已获授权的数据；平台覆盖率、账号风控与商业权限必须在客户真实账号下验证。界面中的初始五条线索为产品演示样本，新运行日志不再使用模拟抓取数字。</span></div>
+      <div className="boundary-note"><b>DATA POLICY</b><span>只处理知乎公开或已获授权内容；平台页面变化、账号权限与风控会影响覆盖率。界面不注入演示线索，所有统计均来自真实运行。</span></div>
     </section>
   );
 }
@@ -1030,13 +1058,14 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
   const [name, setName] = useState(task?.name ?? "模拟IC设计工程师");
   const [jd, setJd] = useState(task?.jd ?? "模拟IC设计工程师，5年以上经验，熟悉PLL、ADC或电源管理芯片，有完整流片经验，工作地点上海。");
   const [techKeywords, setTechKeywords] = useState<string[]>(task?.techKeywords ?? []);
+  const [techKeywordText, setTechKeywordText] = useState((task?.techKeywords ?? []).join("、"));
   const [companies, setCompanies] = useState((task?.companyKeywords ?? ["海思", "圣邦微", "思瑞浦"]).join("、"));
   const [signals, setSignals] = useState((task?.signalKeywords ?? ["看机会", "准备离职", "团队调整", "扩招", "流片延期"]).join("、"));
   const [excludes, setExcludes] = useState((task?.excludeKeywords ?? ["培训", "招生", "广告"]).join("、"));
   const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
   const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
-  const [sources, setSources] = useState(task?.sources.filter((source) => ALL_SOURCES.includes(source)) ?? ["知乎", "EDA365", "微博"]);
-  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>(() => Object.fromEntries(ALL_SOURCES.map((source) => [source, Math.max(1, Math.min(50, Number(task?.sourceLimits?.[source] ?? DEFAULT_SOURCE_LIMITS[source] ?? 10)))])));
+  const sources = ["知乎"];
+  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>({ 知乎: Math.max(1, Math.min(50, Number(task?.sourceLimits?.知乎 ?? DEFAULT_SOURCE_LIMITS.知乎))) });
   const [schedule, setSchedule] = useState(task?.schedule ?? "每天 09:00");
   const [timeRange, setTimeRange] = useState(task?.timeRange ?? "近30天");
   const [saving, setSaving] = useState(false);
@@ -1053,6 +1082,7 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
       const result = await response.json() as { techKeywords?: string[]; companyKeywords?: string[]; signalKeywords?: string[]; excludeKeywords?: string[]; error?: string };
       if (response.ok) {
         setTechKeywords(result.techKeywords ?? []);
+        setTechKeywordText((result.techKeywords ?? []).join("、"));
         if (result.companyKeywords?.length) setCompanies(result.companyKeywords.join("、"));
         if (result.signalKeywords?.length) setSignals(result.signalKeywords.join("、"));
         if (result.excludeKeywords?.length) setExcludes(result.excludeKeywords.join("、"));
@@ -1066,10 +1096,10 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
 
   async function save() {
     if (!name.trim() || !jd.trim()) { setFormError("任务名称和 JD 不能为空"); return; }
-    if (!sources.length) { setFormError("至少选择一个数据源"); return; }
     setFormError("");
     setSaving(true);
-    const effectiveTechKeywords = techKeywords.length ? techKeywords : await analyze();
+    const manualTechKeywords = split(techKeywordText);
+    const effectiveTechKeywords = manualTechKeywords.length ? manualTechKeywords : techKeywords.length ? techKeywords : await analyze();
     try {
       const response = await fetch("/api/state", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1096,12 +1126,13 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
           <label><span>职位描述 JD</span><textarea rows={5} value={jd} onChange={(event) => setJd(event.target.value)} /></label>
           <button className="analyze-button" disabled={analyzing} onClick={() => void analyze()}>{analyzing ? "正在拆解…" : "✦ AI拆解技术栈和检索词"}</button>
           {techKeywords.length > 0 && <div className="keyword-box"><b>识别及扩展出的技术词</b><div className="tag-row">{techKeywords.map((word) => <span key={word}>{word}</span>)}</div><small>服务端芯片行业词库会扩展缩写、同义词和EDA工具名称。</small></div>}
+          <label><span>技术栈关键词（可编辑）</span><input value={techKeywordText} onChange={(event) => setTechKeywordText(event.target.value)} placeholder="例如：UVM、SystemVerilog、VCS、SoC验证" /></label>
           <label><span>目标企业</span><input value={companies} onChange={(event) => setCompanies(event.target.value)} /></label>
           <label><span>求职与企业信号关键词</span><input value={signals} onChange={(event) => setSignals(event.target.value)} /></label>
           <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} /></label>
           <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
           <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
-          <fieldset className="source-depth-fieldset"><legend>每个平台深读多少条</legend><p>默认优先知乎和行业论坛；短内容平台用于补充与交叉验证。每条都会打开详情并读正文和公开评论。</p><div className="source-depth-grid">{ALL_SOURCES.map((source) => { const enabled = sources.includes(source); return <label className={enabled ? "enabled" : ""} key={source}><input type="checkbox" checked={enabled} onChange={() => setSources((current) => current.includes(source) ? current.filter((item) => item !== source) : [...current, source])} /><span>{source}</span><input aria-label={`${source}深读条数`} type="number" min="1" max="50" disabled={!enabled} value={sourceLimits[source]} onChange={(event) => setSourceLimits((current) => ({ ...current, [source]: Math.max(1, Math.min(50, Number(event.target.value) || 1)) }))} /><em>条</em></label>; })}</div></fieldset>
+          <fieldset className="source-depth-fieldset"><legend>知乎深读范围</legend><p>默认最新优先：先用当前年月检索，并在结果页按发布时间排序、预过滤超期内容；之后才打开详情读取正文、评论、作者和原始链接。</p><div className="source-depth-grid"><label className="enabled"><span>知乎 · 最新优先</span><input aria-label="知乎深读条数" type="number" min="1" max="50" value={sourceLimits.知乎} onChange={(event) => setSourceLimits({ 知乎: Math.max(1, Math.min(50, Number(event.target.value) || 1)) })} /><em>条 / 次</em></label></div></fieldset>
           {formError && <div className="form-error" role="alert">{formError}</div>}
         </div>
         <div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : task ? "保存任务" : "创建并进入任务"}</button></div>
@@ -1115,12 +1146,12 @@ function StartupSetupModal({ onConfigure, onClose }: { onConfigure: () => void; 
     <div className="modal-backdrop startup-backdrop" role="presentation">
       <section className="startup-setup-modal" role="dialog" aria-modal="true" aria-labelledby="startup-setup-title">
         <div className="startup-step">STARTUP CHECK</div>
-        <div className="startup-icon"><span>XT</span><i /></div>
-        <p className="eyebrow">SOURCE SETUP</p>
-        <h2 id="startup-setup-title">按需配置数据源</h2>
-        <p>每个平台都可以单独打开和登录。完成配置后，芯探会自动测试查找、滚动、内容读取和来源链接。</p>
+        <div className="startup-icon"><span>X</span><i /></div>
+        <p className="eyebrow">CONNECT SOURCE</p>
+        <h2 id="startup-setup-title">Connect Zhihu</h2>
+        <p>打开专用浏览器并登录知乎。完成后，芯探会自动测试搜索、滚动、详情、评论和来源链接。</p>
         <div className="startup-source-row">{ALL_SOURCES.map((source) => <span key={source}>{initials(source)}<small>{source}</small></span>)}</div>
-        <div className="startup-hint"><b>不必一次配置全部</b><span>进入“设置”后，选择当前需要的平台逐个配置即可。</span></div>
+        <div className="startup-hint"><b>登录状态保存在本机</b><span>系统不要求填写知乎账号或密码，后续任务复用该浏览器会话。</span></div>
         <div className="startup-actions">
           <button className="ghost-button" onClick={onClose}>稍后配置</button>
           <button className="primary-button" onClick={onConfigure}>进入设置</button>
@@ -1139,7 +1170,7 @@ function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; on
           <p className="guide-intro">不用先研究所有菜单。创建一个任务、运行一次检索、审核一条线索，就能理解完整工作流。</p>
           <div className="guide-journey">
             <article><span>01</span><div><h3>粘贴客户 JD</h3><p>系统自动识别职位、技术栈、目标企业、求职信号和排除词，你只需检查结果。</p><button onClick={onCreate}>创建检索任务 →</button></div></article>
-            <article><span>02</span><div><h3>连接已登录的电脑浏览器</h3><p>先在电脑上登录抖音、小红书等平台；电脑助手会复用现有登录状态，不需要在本系统填写账号密码。</p><button onClick={() => onNavigate("settings")}>打开设置 →</button></div></article>
+            <article><span>02</span><div><h3>连接已登录的知乎浏览器</h3><p>电脑助手复用本机知乎登录状态，不需要在系统中填写账号或密码。</p><button onClick={() => onNavigate("settings")}>打开设置 →</button></div></article>
             <article><span>03</span><div><h3>人工复核高价值线索</h3><p>优先看 A 级线索，核对公开原文、作者和来源链接，再标记确认或误报。</p><button onClick={() => onNavigate("leads")}>打开线索工作台 →</button></div></article>
           </div>
           <div className="guide-terms"><b>三个概念</b><span><strong>任务</strong>＝一套持续运行的检索条件</span><span><strong>线索</strong>＝经过过滤和分析的公开内容</span><span><strong>运行日志</strong>＝每次获取、过滤、去重的审计记录</span></div>
