@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const tasks = sqliteTable(
   "tasks",
@@ -15,6 +15,14 @@ export const tasks = sqliteTable(
     excludeKeywords: text("exclude_keywords").notNull().default("[]"),
     schedule: text("schedule").notNull().default("每天 09:00"),
     timeRange: text("time_range").notNull().default("近30天"),
+    roleFamily: text("role_family"),
+    locations: text("locations").notNull().default("[]"),
+    seniority: text("seniority").notNull().default(""),
+    queryGroups: text("query_groups").notNull().default("[]"),
+    analysisProfileId: text("analysis_profile_id"),
+    scanMode: text("scan_mode").notNull().default("manual"),
+    lastSuccessfulRunAt: text("last_successful_run_at"),
+    version: integer("version").notNull().default(1),
     discovered: integer("discovered").notNull().default(0),
     highValue: integer("high_value").notNull().default(0),
     lastRunAt: text("last_run_at"),
@@ -30,6 +38,9 @@ export const leads = sqliteTable(
   {
     id: text("id").primaryKey(),
     taskId: text("task_id").notNull(),
+    rawItemId: text("raw_item_id"),
+    analysisId: text("analysis_id"),
+    leadType: text("lead_type").notNull().default("uncertain"),
     source: text("source").notNull(),
     author: text("author").notNull(),
     authorId: text("author_id").notNull().default(""),
@@ -40,15 +51,26 @@ export const leads = sqliteTable(
     intelligenceType: text("intelligence_type").notNull().default("人才线索"),
     priority: text("priority").notNull().default("C"),
     score: integer("score").notNull().default(0),
+    jobMatchScore: integer("job_match_score").notNull().default(0),
+    intentScore: integer("intent_score").notNull().default(0),
+    intelScore: integer("intel_score").notNull().default(0),
+    identityConfidence: real("identity_confidence").notNull().default(0),
+    evidenceConfidence: real("evidence_confidence").notNull().default(0),
+    overallScore: integer("overall_score").notNull().default(0),
     companyNote: text("company_note").notNull().default(""),
     evidence: text("evidence").notNull().default(""),
     url: text("url").notNull(),
     reviewStatus: text("review_status").notNull().default("待审核"),
+    reviewNote: text("review_note").notNull().default(""),
+    reviewedBy: text("reviewed_by").notNull().default(""),
+    reviewedAt: text("reviewed_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
     index("idx_leads_task_priority").on(table.taskId, table.priority),
     index("idx_leads_source_published").on(table.source, table.publishedAt),
+    index("idx_leads_review_created").on(table.reviewStatus, table.createdAt),
+    index("idx_leads_raw_item").on(table.rawItemId),
   ],
 );
 
@@ -95,22 +117,146 @@ export const rawItems = sqliteTable(
   "raw_items",
   {
     id: text("id").primaryKey(),
-    taskId: text("task_id").notNull(),
     source: text("source").notNull(),
     externalId: text("external_id").notNull().default(""),
+    canonicalUrl: text("canonical_url").notNull(),
     contentHash: text("content_hash").notNull(),
     author: text("author").notNull().default("未公开"),
     authorId: text("author_id").notNull().default(""),
-    publishedAt: text("published_at").notNull(),
-    sourceUrl: text("source_url").notNull(),
+    authorProfileUrl: text("author_profile_url").notNull().default(""),
+    publishedAt: text("published_at"),
+    publishedAtRaw: text("published_at_raw").notNull().default(""),
+    timeConfidence: text("time_confidence").notNull().default("unknown"),
+    title: text("title").notNull().default(""),
     snippet: text("snippet").notNull(),
+    fullText: text("full_text").notNull().default(""),
+    contentType: text("content_type").notNull().default("post"),
     rawPayload: text("raw_payload").notNull().default("{}"),
     fetchedAt: text("fetched_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex("uq_raw_task_hash").on(table.taskId, table.contentHash),
-    index("idx_raw_task_fetched").on(table.taskId, table.fetchedAt),
+    uniqueIndex("uq_raw_source_url").on(table.source, table.canonicalUrl),
+    index("idx_raw_source_external").on(table.source, table.externalId),
+    index("idx_raw_content_hash").on(table.contentHash),
+    index("idx_raw_source_published").on(table.source, table.publishedAt),
   ],
+);
+
+export const taskItemMatches = sqliteTable(
+  "task_item_matches",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    rawItemId: text("raw_item_id").notNull(),
+    matchedKeywords: text("matched_keywords").notNull().default("[]"),
+    matchScore: integer("match_score").notNull().default(0),
+    matchReason: text("match_reason").notNull().default(""),
+    firstMatchedAt: text("first_matched_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastMatchedAt: text("last_matched_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("uq_task_item_match").on(table.taskId, table.rawItemId),
+    index("idx_task_matches_raw").on(table.rawItemId),
+  ],
+);
+
+export const analyses = sqliteTable(
+  "analyses",
+  {
+    id: text("id").primaryKey(),
+    rawItemId: text("raw_item_id").notNull(),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    taxonomyVersion: text("taxonomy_version").notNull(),
+    intelligenceType: text("intelligence_type").notNull(),
+    jobMatchScore: integer("job_match_score").notNull().default(0),
+    jobIntentScore: integer("job_intent_score").notNull().default(0),
+    companyIntelScore: integer("company_intel_score").notNull().default(0),
+    identityConfidence: real("identity_confidence").notNull().default(0),
+    evidenceConfidence: real("evidence_confidence").notNull().default(0),
+    tags: text("tags").notNull().default("[]"),
+    evidenceQuotes: text("evidence_quotes").notNull().default("[]"),
+    summary: text("summary").notNull().default(""),
+    uncertainty: text("uncertainty").notNull().default("[]"),
+    rawOutput: text("raw_output").notNull().default("{}"),
+    status: text("status").notNull(),
+    errorCode: text("error_code").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_analyses_raw_status_created").on(table.rawItemId, table.status, table.createdAt)],
+);
+
+export const runSourceStats = sqliteTable(
+  "run_source_stats",
+  {
+    runId: text("run_id").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull(),
+    discovered: integer("discovered").notNull().default(0),
+    timeFiltered: integer("time_filtered").notNull().default(0),
+    blacklistFiltered: integer("blacklist_filtered").notNull().default(0),
+    advertisementFiltered: integer("advertisement_filtered").notNull().default(0),
+    deduped: integer("deduped").notNull().default(0),
+    matched: integer("matched").notNull().default(0),
+    analyzed: integer("analyzed").notNull().default(0),
+    kept: integer("kept").notNull().default(0),
+    failed: integer("failed").notNull().default(0),
+    startedAt: text("started_at").notNull(),
+    finishedAt: text("finished_at"),
+    errorCode: text("error_code").notNull().default(""),
+    errorMessage: text("error_message").notNull().default(""),
+  },
+  (table) => [uniqueIndex("uq_run_source_stats").on(table.runId, table.source)],
+);
+
+export const runEvents = sqliteTable(
+  "run_events",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull(),
+    level: text("level").notNull(),
+    stage: text("stage").notNull(),
+    source: text("source").notNull().default(""),
+    message: text("message").notNull(),
+    metadata: text("metadata").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_run_events_run_created").on(table.runId, table.createdAt)],
+);
+
+export const importBatches = sqliteTable(
+  "import_batches",
+  {
+    id: text("id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    fileName: text("file_name").notNull().default(""),
+    format: text("format").notNull(),
+    status: text("status").notNull(),
+    total: integer("total").notNull().default(0),
+    accepted: integer("accepted").notNull().default(0),
+    duplicated: integer("duplicated").notNull().default(0),
+    filtered: integer("filtered").notNull().default(0),
+    failed: integer("failed").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    finishedAt: text("finished_at"),
+  },
+  (table) => [index("idx_import_batches_task_created").on(table.taskId, table.createdAt)],
+);
+
+export const importRows = sqliteTable(
+  "import_rows",
+  {
+    id: text("id").primaryKey(),
+    batchId: text("batch_id").notNull(),
+    rowNumber: integer("row_number").notNull(),
+    status: text("status").notNull(),
+    errorCode: text("error_code").notNull().default(""),
+    errorMessage: text("error_message").notNull().default(""),
+    rawItemId: text("raw_item_id"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_import_rows_batch_row").on(table.batchId, table.rowNumber)],
 );
 
 export const connectorJobs = sqliteTable(

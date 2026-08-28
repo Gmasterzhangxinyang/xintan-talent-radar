@@ -1,15 +1,10 @@
-import { analyzeCandidate } from "./analyzer";
 import { collectPublicForum, dispatchComputerAgent, SOCIAL_SOURCES } from "./connectors";
-import { contentHash } from "./dedupe";
 import { parseStringArray } from "./json";
 import type { CandidateItem, IngestStats, TaskRecord } from "./types";
+import { ingestCandidates } from "./pipeline/ingest";
+import { recordRunEvent } from "./runs/logger";
 
-function allowedByTime(value: string | undefined, range: string) {
-  if (!value) return true;
-  const days = Number(range.match(/\d+/)?.[0] ?? 30);
-  const time = Date.parse(value);
-  return Number.isNaN(time) || time >= Date.now() - days * 86_400_000;
-}
+export { ingestCandidates } from "./pipeline/ingest";
 
 function nextScheduledAt(schedule: string) {
   if (schedule === "仅手动运行") return null;
@@ -17,59 +12,6 @@ function nextScheduledAt(schedule: string) {
   const time = schedule.match(/(\d{1,2}):(\d{2})/);
   if (time) next.setUTCHours((Number(time[1]) + 16) % 24, Number(time[2]), 0, 0);
   return next.toISOString();
-}
-
-export async function ingestCandidates(db: D1Database, task: TaskRecord, items: CandidateItem[]): Promise<IngestStats> {
-  const stats: IngestStats = { fetched: items.length, filtered: 0, deduped: 0, valid: 0, highValue: 0 };
-  const tech = parseStringArray(task.tech_keywords);
-  const companies = parseStringArray(task.company_keywords);
-  const signals = parseStringArray(task.signal_keywords);
-  const excludes = parseStringArray(task.exclude_keywords).map((item) => item.toLowerCase());
-  const filterRow = await db.prepare("SELECT author_blacklist, company_blacklist FROM task_filters WHERE task_id = ?").bind(task.id).first<Record<string, string>>();
-  const authorBlacklist = parseStringArray(filterRow?.author_blacklist).map((item) => item.toLowerCase());
-  const companyBlacklist = parseStringArray(filterRow?.company_blacklist).map((item) => item.toLowerCase());
-  for (const item of items) {
-    const searchable = `${item.author ?? ""} ${item.snippet}`.toLowerCase();
-    let validUrl = false;
-    try { validUrl = ["http:", "https:"].includes(new URL(item.url).protocol); } catch { validUrl = false; }
-    if (!item.snippet.trim() || item.snippet.length > 5_000 || !validUrl || !allowedByTime(item.publishedAt, task.time_range) ||
-      excludes.some((term) => searchable.includes(term)) || authorBlacklist.some((term) => (item.author ?? "").toLowerCase().includes(term)) ||
-      companyBlacklist.some((term) => searchable.includes(term))) {
-      stats.filtered += 1;
-      continue;
-    }
-    const hash = await contentHash(task.id, item.source, item.snippet, item.url);
-    const duplicate = await db.prepare("SELECT id FROM raw_items WHERE task_id = ? AND content_hash = ?").bind(task.id, hash).first();
-    if (duplicate) { stats.deduped += 1; continue; }
-    const fallbackAnalysis = analyzeCandidate(item.snippet, { tech, companies, signals });
-    const raw = item.raw && typeof item.raw === "object" ? item.raw as Record<string, unknown> : {};
-    const ai = raw.aiAnalysis && typeof raw.aiAnalysis === "object" ? raw.aiAnalysis as Record<string, unknown> : null;
-    const analysis = ai ? {
-      tags: Array.isArray(ai.tags) ? ai.tags.map(String).slice(0, 8) : fallbackAnalysis.tags,
-      intent: ["强", "中", "无"].includes(String(ai.intent)) ? String(ai.intent) : fallbackAnalysis.intent,
-      intelligenceType: ["人才线索", "企业情报"].includes(String(ai.intelligenceType)) ? String(ai.intelligenceType) : fallbackAnalysis.intelligenceType,
-      priority: ["A", "B", "C"].includes(String(ai.priority)) ? String(ai.priority) : fallbackAnalysis.priority,
-      score: Math.max(0, Math.min(100, Number(ai.score ?? fallbackAnalysis.score))),
-      companyNote: String(ai.companyNote ?? fallbackAnalysis.companyNote).slice(0, 1_000),
-      evidence: String(ai.evidence ?? fallbackAnalysis.evidence).slice(0, 2_000),
-    } : fallbackAnalysis;
-    const now = new Date().toISOString();
-    const publishedAt = item.publishedAt ?? "未公开";
-    const rawId = `raw-${crypto.randomUUID()}`;
-    const leadId = `lead-${crypto.randomUUID()}`;
-    await db.batch([
-      db.prepare(`INSERT INTO raw_items (id, task_id, source, external_id, content_hash, author, author_id, published_at, source_url, snippet, raw_payload, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(rawId, task.id, item.source, item.externalId ?? "", hash, item.author ?? "未公开", item.authorId ?? "", publishedAt, item.url, item.snippet, JSON.stringify(item.raw ?? {}), now),
-      db.prepare(`INSERT INTO leads (id, task_id, source, author, author_id, published_at, snippet, tags, intent, intelligence_type, priority, score, company_note, evidence, url, review_status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '待审核', ?)`)
-        .bind(leadId, task.id, item.source, item.author ?? "未公开", item.authorId ?? "", publishedAt, item.snippet,
-          JSON.stringify(analysis.tags), analysis.intent, analysis.intelligenceType, analysis.priority, analysis.score, analysis.companyNote, analysis.evidence, item.url, now),
-    ]);
-    stats.valid += 1;
-    if (analysis.priority === "A") stats.highValue += 1;
-  }
-  return stats;
 }
 
 type LocalAgentJob = {
@@ -104,9 +46,23 @@ export async function runTask(
   const startedAt = new Date().toISOString();
   await db.prepare("INSERT INTO runs (id, task_id, task_name, started_at, status, message) VALUES (?, ?, ?, ?, '运行中', '连接器正在执行')")
     .bind(runId, task.id, task.name, startedAt).run();
-  const total: IngestStats = { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0 };
+  await recordRunEvent(db, { runId, stage: "dispatch", message: "任务已进入连接器调度", metadata: { taskId: task.id } });
+  const total: IngestStats = { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0, timeFiltered: 0, blacklistFiltered: 0, advertisementFiltered: 0, matched: 0, analyzed: 0, failed: 0 };
   const messages: string[] = [];
+  const addStats = (stats: IngestStats) => {
+    for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] = (total[key] ?? 0) + (stats[key] ?? 0);
+  };
+  const saveSourceStats = async (source: string, stats: IngestStats, sourceStatus: string, errorCode = "", errorMessage = "") => {
+    await db.prepare(`INSERT OR REPLACE INTO run_source_stats (
+      run_id, source, status, discovered, time_filtered, blacklist_filtered, advertisement_filtered,
+      deduped, matched, analyzed, kept, failed, started_at, finished_at, error_code, error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(runId, source, sourceStatus, stats.fetched, stats.timeFiltered ?? 0, stats.blacklistFiltered ?? 0,
+        stats.advertisementFiltered ?? 0, stats.deduped, stats.matched ?? 0, stats.analyzed ?? 0, stats.valid,
+        stats.failed ?? 0, startedAt, new Date().toISOString(), errorCode, errorMessage.slice(0, 500)).run();
+  };
   for (const source of parseStringArray(task.sources)) {
+    await recordRunEvent(db, { runId, stage: "search", source, message: `开始处理${source}` });
     const sourceCandidates = localCandidates.filter((item) => item.source === source)
       .map((item) => ({ ...item, source }));
     if (SOCIAL_SOURCES.has(source)) {
@@ -131,32 +87,38 @@ export async function runTask(
         total.fetched += inspected + prefiltered;
         total.filtered += aiFiltered;
         if (sourceCandidates.length) {
-          const stats = await ingestCandidates(db, task, sourceCandidates);
-          total.filtered += stats.filtered;
-          total.deduped += stats.deduped;
-          total.valid += stats.valid;
-          total.highValue += stats.highValue;
+          const stats = await ingestCandidates(db, task, sourceCandidates, { runId, source });
+          addStats({ ...stats, fetched: 0 });
+          await saveSourceStats(source, { ...stats, fetched: inspected + prefiltered }, persistedStatus);
           messages.push(`${source}:${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered) + stats.filtered}，重复${stats.deduped}，新增${stats.valid}${persistedStatus === "partial" ? `（${action}）` : ""}`);
         } else if (persistedStatus === "failed") {
+          await saveSourceStats(source, { fetched: inspected + prefiltered, filtered: aiFiltered, deduped: 0, valid: 0, highValue: 0, failed: 1 }, "failed", "connector_failed", action);
           messages.push(`${source}:失败(${action})`);
         } else {
+          await saveSourceStats(source, { fetched: inspected + prefiltered, filtered: aiFiltered, deduped: 0, valid: 0, highValue: 0 }, persistedStatus);
           messages.push(`${source}:${waitingLogin ? "等待登录" : `${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered)}，新增0`}`);
         }
         continue;
       }
       const job = await dispatchComputerAgent({ db, task, source, callbackBase });
+      await saveSourceStats(source, { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0 }, job.status, job.status === "failed" ? "dispatch_failed" : "", "error" in job ? String(job.error ?? "") : "");
       messages.push(`${source}:${job.status === "dispatched" ? "已派发" : job.status === "awaiting_config" ? "等待连接电脑助手" : job.status === "disabled" ? "已停用" : "派发失败"}`);
       continue;
     }
     try {
       const items = sourceCandidates.length ? sourceCandidates : await collectPublicForum(source, task);
-      const stats = await ingestCandidates(db, task, items);
-      for (const key of Object.keys(total) as Array<keyof IngestStats>) total[key] += stats[key];
+      const stats = await ingestCandidates(db, task, items, { runId, source });
+      addStats(stats);
+      await saveSourceStats(source, stats, "completed");
       messages.push(`${source}:获取${stats.fetched}/新增${stats.valid}`);
     } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误";
+      total.failed = (total.failed ?? 0) + 1;
+      await saveSourceStats(source, { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0, failed: 1 }, "failed", "source_failed", message);
+      await recordRunEvent(db, { runId, level: "error", stage: "collect", source, message: "来源处理失败", metadata: { error: message } });
       messages.push(localJobs[source]
         ? `${source}:浏览器已打开（网页直采受限）`
-        : `${source}:失败(${error instanceof Error ? error.message : "未知错误"})`);
+        : `${source}:失败(${message})`);
     }
   }
   const finishedAt = new Date().toISOString();
@@ -166,11 +128,12 @@ export async function runTask(
   await db.batch([
     db.prepare("UPDATE runs SET finished_at = ?, status = ?, fetched = ?, filtered = ?, deduped = ?, valid = ?, high_value = ?, message = ? WHERE id = ?")
       .bind(finishedAt, status, total.fetched, total.filtered, total.deduped, total.valid, total.highValue, messages.join("；"), runId),
-    db.prepare("UPDATE tasks SET discovered = discovered + ?, high_value = high_value + ?, last_run_at = ? WHERE id = ?")
-      .bind(total.valid, total.highValue, finishedAt, task.id),
+    db.prepare("UPDATE tasks SET discovered = discovered + ?, high_value = high_value + ?, last_run_at = ?, last_successful_run_at = CASE WHEN ? = '完成' THEN ? ELSE last_successful_run_at END WHERE id = ?")
+      .bind(total.valid, total.highValue, finishedAt, status, finishedAt, task.id),
     db.prepare(`INSERT INTO task_filters (task_id, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET schedule_enabled=excluded.schedule_enabled, next_run_at=excluded.next_run_at, updated_at=excluded.updated_at`)
       .bind(task.id, task.schedule === "仅手动运行" ? 0 : 1, nextScheduledAt(task.schedule), finishedAt),
   ]);
+  await recordRunEvent(db, { runId, stage: "complete", level: status === "完成" ? "info" : "warning", message: status === "完成" ? "任务完成" : "任务部分完成", metadata: total });
   return { runId, status, ...total, message: messages.join("；") };
 }

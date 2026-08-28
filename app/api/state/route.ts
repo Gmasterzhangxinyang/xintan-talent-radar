@@ -33,6 +33,14 @@ function normalizeTask(row: Record<string, unknown>) {
     excludeKeywords: parseJson(row.exclude_keywords, []),
     schedule: row.schedule,
     timeRange: row.time_range,
+    roleFamily: row.role_family,
+    locations: parseJson(row.locations, []),
+    seniority: row.seniority,
+    queryGroups: parseJson(row.query_groups, []),
+    analysisProfileId: row.analysis_profile_id,
+    scanMode: row.scan_mode,
+    lastSuccessfulRunAt: row.last_successful_run_at,
+    version: row.version,
     discovered: row.discovered,
     highValue: row.high_value,
     lastRunAt: row.last_run_at,
@@ -45,9 +53,15 @@ function normalizeTask(row: Record<string, unknown>) {
 }
 
 function normalizeLead(row: Record<string, unknown>) {
+  const reviewLabels: Record<string, string> = {
+    pending: "待审核", confirmed: "已确认", false_positive: "误报", ignored: "已忽略", follow_up_later: "稍后处理",
+  };
   return {
     id: row.id,
     taskId: row.task_id,
+    rawItemId: row.raw_item_id,
+    analysisId: row.analysis_id,
+    leadType: row.lead_type,
     source: row.source,
     author: row.author,
     authorId: row.author_id,
@@ -58,10 +72,19 @@ function normalizeLead(row: Record<string, unknown>) {
     intelligenceType: row.intelligence_type,
     priority: row.priority,
     score: row.score,
+    jobMatchScore: row.job_match_score,
+    intentScore: row.intent_score,
+    intelScore: row.intel_score,
+    identityConfidence: row.identity_confidence,
+    evidenceConfidence: row.evidence_confidence,
+    overallScore: row.overall_score,
     companyNote: row.company_note,
     evidence: row.evidence,
     url: row.url,
-    reviewStatus: row.review_status,
+    reviewStatus: reviewLabels[String(row.review_status)] ?? row.review_status,
+    reviewNote: row.review_note,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: row.reviewed_at,
   };
 }
 
@@ -110,12 +133,14 @@ export async function GET() {
   try {
     await ensureDatabase();
     const db = getD1();
-    const [taskRows, leadRows, runRows, sourceRows, connectorRows] = await Promise.all([
+    const [taskRows, leadRows, runRows, sourceRows, connectorRows, sourceStatRows, eventRows] = await Promise.all([
       db.prepare("SELECT t.*, f.author_blacklist, f.company_blacklist, f.source_limits, f.schedule_enabled, f.next_run_at FROM tasks t LEFT JOIN task_filters f ON f.task_id=t.id ORDER BY t.created_at DESC").all(),
       db.prepare("SELECT * FROM leads ORDER BY score DESC, published_at DESC").all(),
       db.prepare("SELECT * FROM runs ORDER BY started_at DESC LIMIT 30").all(),
       db.prepare("SELECT * FROM sources ORDER BY name").all(),
       db.prepare("SELECT * FROM connector_jobs ORDER BY dispatched_at DESC LIMIT 50").all(),
+      db.prepare("SELECT * FROM run_source_stats ORDER BY started_at DESC LIMIT 100").all(),
+      db.prepare("SELECT * FROM run_events ORDER BY created_at DESC LIMIT 200").all(),
     ]);
 
     return Response.json({
@@ -124,6 +149,8 @@ export async function GET() {
       runs: runRows.results.map((row) => normalizeRun(row as Record<string, unknown>)),
       sources: sourceRows.results.map((row) => normalizeSource(row as Record<string, unknown>)),
       connectorJobs: connectorRows.results.map((row) => normalizeConnectorJob(row as Record<string, unknown>)),
+      runSourceStats: sourceStatRows.results,
+      runEvents: eventRows.results,
     });
   } catch (error) {
     return Response.json(
@@ -146,9 +173,10 @@ export async function POST(request: Request) {
       const now = new Date().toISOString();
       await db.batch([db.prepare(`INSERT INTO tasks (
         id, name, jd, status, sources, tech_keywords, company_keywords,
-        signal_keywords, exclude_keywords, schedule, time_range, discovered,
-        high_value, last_run_at, created_at
-      ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?)`)
+        signal_keywords, exclude_keywords, schedule, time_range, role_family, locations,
+        seniority, query_groups, analysis_profile_id, scan_mode, discovered,
+        high_value, last_run_at, last_successful_run_at, version, created_at
+      ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, 1, ?)`)
         .bind(
           id,
           String(task.name ?? "未命名任务"),
@@ -160,6 +188,12 @@ export async function POST(request: Request) {
           JSON.stringify(task.excludeKeywords ?? []),
           String(task.schedule ?? "仅手动运行"),
           String(task.timeRange ?? "近30天"),
+          task.roleFamily ? String(task.roleFamily) : null,
+          JSON.stringify(task.locations ?? []),
+          String(task.seniority ?? ""),
+          JSON.stringify(task.queryGroups ?? []),
+          task.analysisProfileId ? String(task.analysisProfileId) : null,
+          String(task.scanMode ?? (task.scheduleEnabled === false ? "manual" : "scheduled")),
           now,
         )
         ,
@@ -197,10 +231,13 @@ export async function POST(request: Request) {
       const id = String(task.id ?? "");
       if (!id) return Response.json({ error: "缺少任务ID" }, { status: 400 });
       await db.batch([
-        db.prepare(`UPDATE tasks SET name=?, jd=?, status=?, sources=?, tech_keywords=?, company_keywords=?, signal_keywords=?, exclude_keywords=?, schedule=?, time_range=? WHERE id=?`)
+        db.prepare(`UPDATE tasks SET name=?, jd=?, status=?, sources=?, tech_keywords=?, company_keywords=?, signal_keywords=?, exclude_keywords=?, schedule=?, time_range=?, role_family=?, locations=?, seniority=?, query_groups=?, analysis_profile_id=?, scan_mode=?, version=version+1 WHERE id=?`)
           .bind(String(task.name ?? "未命名任务"), String(task.jd ?? ""), String(task.status ?? "active"), JSON.stringify(["知乎"]),
             JSON.stringify(task.techKeywords ?? []), JSON.stringify(task.companyKeywords ?? []), JSON.stringify(task.signalKeywords ?? []),
-            JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "仅手动运行"), String(task.timeRange ?? "近30天"), id),
+            JSON.stringify(task.excludeKeywords ?? []), String(task.schedule ?? "仅手动运行"), String(task.timeRange ?? "近30天"),
+            task.roleFamily ? String(task.roleFamily) : null, JSON.stringify(task.locations ?? []), String(task.seniority ?? ""),
+            JSON.stringify(task.queryGroups ?? []), task.analysisProfileId ? String(task.analysisProfileId) : null,
+            String(task.scanMode ?? (task.scheduleEnabled === false ? "manual" : "scheduled")), id),
         db.prepare("INSERT OR REPLACE INTO task_filters (task_id, author_blacklist, company_blacklist, source_limits, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .bind(id, JSON.stringify(task.authorBlacklist ?? []), JSON.stringify(task.companyBlacklist ?? []), JSON.stringify({ 知乎: Math.max(1, Math.min(50, Number((task.sourceLimits as Record<string, unknown> | undefined)?.知乎 ?? 10))) }), task.scheduleEnabled === false ? 0 : 1, task.scheduleEnabled === false ? null : nextScheduledAt(String(task.schedule ?? "仅手动运行")), new Date().toISOString()),
       ]);
@@ -218,7 +255,7 @@ export async function POST(request: Request) {
       const taskId = String(payload.taskId ?? "");
       await db.batch([
         db.prepare("DELETE FROM connector_jobs WHERE task_id = ?").bind(taskId),
-        db.prepare("DELETE FROM raw_items WHERE task_id = ?").bind(taskId),
+        db.prepare("DELETE FROM task_item_matches WHERE task_id = ?").bind(taskId),
         db.prepare("DELETE FROM task_filters WHERE task_id = ?").bind(taskId),
         db.prepare("DELETE FROM leads WHERE task_id = ?").bind(taskId),
         db.prepare("DELETE FROM runs WHERE task_id = ?").bind(taskId),
@@ -229,9 +266,13 @@ export async function POST(request: Request) {
 
     if (action === "reviewLead") {
       const leadId = String(payload.leadId ?? "");
-      const reviewStatus = String(payload.reviewStatus ?? "待审核");
-      await db.prepare("UPDATE leads SET review_status = ? WHERE id = ?")
-        .bind(reviewStatus, leadId)
+      const reviewStatusMap: Record<string, string> = {
+        待审核: "pending", 已确认: "confirmed", 误报: "false_positive", 已忽略: "ignored", 稍后处理: "follow_up_later",
+        pending: "pending", confirmed: "confirmed", false_positive: "false_positive", ignored: "ignored", follow_up_later: "follow_up_later",
+      };
+      const reviewStatus = reviewStatusMap[String(payload.reviewStatus ?? "pending")] ?? "pending";
+      await db.prepare("UPDATE leads SET review_status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?")
+        .bind(reviewStatus, String(payload.reviewNote ?? "").slice(0, 2_000), String(payload.reviewedBy ?? "local-user").slice(0, 120), new Date().toISOString(), leadId)
         .run();
       return Response.json({ ok: true });
     }

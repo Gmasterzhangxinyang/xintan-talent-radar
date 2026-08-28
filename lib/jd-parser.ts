@@ -34,10 +34,17 @@ const KNOWN_COMPANIES = [
 const DEFAULT_SIGNALS = ["看机会", "准备离职", "考虑跳槽", "团队调整", "项目被砍", "裁员", "扩招", "开放HC", "流片延期"];
 const DEFAULT_EXCLUDES = ["培训", "课程", "招生", "广告", "猎头同行", "营销号", "代写"];
 
+function includesAlias(text: string, alias: string) {
+  const normalized = alias.toLowerCase();
+  if (!/^[a-z0-9][a-z0-9 .+&-]*$/.test(normalized)) return text.includes(normalized);
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(text);
+}
+
 export function parseJd(jd: string) {
   const lowered = jd.toLowerCase();
   const techKeywords = Object.entries(TECH_ONTOLOGY)
-    .filter(([, aliases]) => aliases.some((alias) => lowered.includes(alias.toLowerCase())))
+    .filter(([, aliases]) => aliases.some((alias) => includesAlias(lowered, alias)))
     .map(([canonical]) => canonical.replace("RISC_V", "RISC-V"));
   const processes = jd.match(/(?:\d{1,2}\s*nm|\d{1,2}纳米)/gi) ?? [];
   const companyKeywords = KNOWN_COMPANIES.filter((company) => lowered.includes(company.toLowerCase()));

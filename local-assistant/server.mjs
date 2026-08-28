@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { chromium } from "playwright-core";
+import { detectBrowserExecutable, platformLabel } from "./platform.mjs";
+import { isZhihuContentUrl, parseVisibleDate } from "./zhihu-utils.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = 8765;
@@ -23,7 +25,10 @@ const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_FILE = resolve(PROJECT_DIR, "work", "local-assistant-sessions.json");
 const AI_SETTINGS_FILE = resolve(PROJECT_DIR, "work", "ai-brain-settings.json");
 const BROWSER_PROFILE_DIR = resolve(PROJECT_DIR, "work", "browser-profile");
-const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const BROWSER_EXECUTABLE = detectBrowserExecutable();
+const OPERATING_SYSTEM = platformLabel();
+const ASSISTANT_STARTED_AT = new Date().toISOString();
+const ASSISTANT_VERSION = "1.1.0-zhihu";
 mkdirSync(resolve(PROJECT_DIR, "work"), { recursive: true });
 let sessionStates = Object.fromEntries(SOCIAL_PLATFORMS.map((platform) => [platform, { status: "unknown", lastCheckedAt: new Date().toISOString() }]));
 let verificationStates = {};
@@ -212,6 +217,43 @@ async function askAiBrainWithRetry(observation) {
   throw lastError;
 }
 
+async function analyzeImportedItems(items, task) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      const item = items[index] && typeof items[index] === "object" ? items[index] : {};
+      try {
+        const decision = await askAiBrainWithRetry({
+          importMode: true,
+          task: {
+            name: String(task?.name ?? "导入分析"), techKeywords: Array.isArray(task?.techKeywords) ? task.techKeywords : [],
+            companyKeywords: Array.isArray(task?.companyKeywords) ? task.companyKeywords : [],
+            signalKeywords: Array.isArray(task?.signalKeywords) ? task.signalKeywords : [],
+          },
+          platform: String(item.source ?? "导入"), pageUrl: String(item.url ?? ""),
+          candidate: { author: String(item.author ?? ""), publishedAt: String(item.publishedAt ?? ""), snippet: String(item.fullText ?? item.snippet ?? ""), url: String(item.url ?? "") },
+          safeActions: ["keep", "filter", "stop"],
+          instruction: "这是用户主动导入的公开内容。只做结构化分析，不执行浏览器操作；证据必须逐字来自输入原文。",
+        });
+        results[index] = decision.decision === "keep" ? {
+          status: "accepted",
+          item: { ...item, raw: { ...(item.raw && typeof item.raw === "object" ? item.raw : {}), aiAnalysis: {
+            tags: decision.tags, intent: decision.intent, intelligenceType: decision.intelligenceType,
+            score: decision.score, reasoningSummary: decision.reasoningSummary, companyNote: decision.reasoningSummary,
+            evidenceQuotes: decision.evidenceQuotes, confidence: decision.confidence, model: decision.model, responseId: decision.responseId,
+          } } },
+        } : { status: "filtered", reason: decision.reasoningSummary };
+      } catch (error) {
+        results[index] = { status: "failed", reason: error instanceof Error ? error.message : "AI分析失败" };
+      }
+    }
+  }
+  await Promise.all([worker(), worker()]);
+  return results;
+}
+
 function enforceAgentPolicy(decision, job, item) {
   const blocked = [];
   let action = decision.nextAction;
@@ -247,7 +289,7 @@ async function ensureBrowser() {
     }
   } catch { /* start a dedicated browser below */ }
   browserContext = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
-    executablePath: CHROME_PATH,
+    ...(BROWSER_EXECUTABLE ? { executablePath: BROWSER_EXECUTABLE } : {}),
     headless: false,
     viewport: null,
     args: ["--window-size=760,620", "--window-position=80,70", "--remote-debugging-port=9222", "--disable-blink-features=AutomationControlled"],
@@ -319,32 +361,6 @@ function buildSearchPlan(job, queries) {
   return plan.slice(0, 18).length ? plan.slice(0, 18) : [["芯片"]];
 }
 
-function parseVisibleDate(value) {
-  const text = String(value || "").replace(/^(?:发布于|编辑于|更新于|最后编辑于)\s*/, "").trim();
-  if (!text || text === "未公开") return null;
-  const now = new Date();
-  if (/刚刚/.test(text)) return now;
-  const relative = text.match(/(\d+)\s*(分钟前|小时前|天前)/);
-  if (relative) {
-    const amount = Number(relative[1]);
-    const unitMs = relative[2] === "分钟前" ? 60_000 : relative[2] === "小时前" ? 3_600_000 : 86_400_000;
-    return new Date(now.getTime() - amount * unitMs);
-  }
-  const direct = new Date(text);
-  if (!Number.isNaN(direct.getTime())) return direct;
-  const normalized = text.replace(/[年月]/g, "-").replace(/日/g, "").replace(/\//g, "-").replace(/(\d)\.(?=\d{1,2}(?:\D|$))/g, "$1-");
-  if (/^\d{1,2}-\d{1,2}/.test(normalized)) {
-    const withYear = `${now.getFullYear()}-${normalized}`;
-    const date = new Date(withYear);
-    if (!Number.isNaN(date.getTime())) {
-      if (date.getTime() > now.getTime() + 86_400_000) date.setFullYear(date.getFullYear() - 1);
-      return date;
-    }
-  }
-  const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
 function hardFilterReasons(job, metadata, detailText) {
   const searchable = `${metadata.author || ""} ${detailText}`.toLowerCase();
   const reasons = [];
@@ -362,7 +378,7 @@ function hardFilterReasons(job, metadata, detailText) {
 }
 
 function isContentUrl(platform, parsed) {
-  return platform === "知乎" && (/\/(question|p)\//.test(parsed.pathname) || /\/answer\//.test(parsed.pathname));
+  return platform === "知乎" && isZhihuContentUrl(parsed);
 }
 
 async function showItemAnalysis(page, item, analysis, position, total, stage) {
@@ -897,7 +913,12 @@ async function processSearchJob(job, queries) {
           results.push({
             source: job.platform, externalId: parsed.toString(), url: parsed.toString(),
             author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt, snippet: detailExcerpt || item.snippet,
-            raw: { aiAnalysis: { tags: brainDecision.tags, intent: brainDecision.intent, intelligenceType: brainDecision.intelligenceType, priority: brainDecision.priority, score: brainDecision.score, companyNote: brainDecision.reasoningSummary, evidence: brainDecision.evidenceQuotes.join("；"), confidence: brainDecision.confidence } },
+            raw: { aiAnalysis: {
+              tags: brainDecision.tags, intent: brainDecision.intent, intelligenceType: brainDecision.intelligenceType,
+              score: brainDecision.score, reasoningSummary: brainDecision.reasoningSummary,
+              companyNote: brainDecision.reasoningSummary, evidenceQuotes: brainDecision.evidenceQuotes,
+              confidence: brainDecision.confidence, model: brainDecision.model, responseId: brainDecision.responseId,
+            } },
           });
         }
         searchJobs.set(job.jobId, {
@@ -1051,9 +1072,20 @@ const server = http.createServer(async (request, response) => {
     return json(response, 200, {
       ok: true,
       name: "芯探电脑助手",
-      version: "1.0.4-zhihu",
+      version: ASSISTANT_VERSION,
       operatorWindow: "direct",
-      capabilities: ["zhihu_only", "open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "official_search_metadata", "freshness_first", "background_scheduler", "central_ai_brain", "ai_retry", "ai_fail_soft", "policy_guard", "agent_loop", "query_rotation", "strict_time_filter", "blacklist_filter", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications"],
+      operatingSystem: OPERATING_SYSTEM, browserExecutableDetected: Boolean(BROWSER_EXECUTABLE),
+      capabilities: ["zhihu_only", "open_platform", "direct_operator_window", "browser_sessions", "search_tasks", "import_analysis", "official_search_metadata", "freshness_first", "background_scheduler", "central_ai_brain", "ai_retry", "ai_fail_soft", "policy_guard", "agent_loop", "query_rotation", "strict_time_filter", "blacklist_filter", "sequential_comment_read", "visual_frame_analysis", "mandatory_detail_read", "evidence_quotes", "per_item_analysis", "analysis_audit", "source_verifications", "heartbeat", "cross_platform_browser_detection"],
+    });
+  }
+  if (request.method === "GET" && url.pathname === "/v1/heartbeat") {
+    const jobs = [...searchJobs.values()];
+    return json(response, 200, {
+      ok: true, version: ASSISTANT_VERSION, operatingSystem: OPERATING_SYSTEM,
+      startedAt: ASSISTANT_STARTED_AT, checkedAt: new Date().toISOString(),
+      browser: { connected: Boolean(browserContext), executableDetected: Boolean(BROWSER_EXECUTABLE) },
+      sessions: Object.entries(sessionStates).map(([platform, state]) => ({ platform, ...state })),
+      jobs: { active: jobs.filter((job) => ["running", "waiting_login"].includes(job.status)).length, total: jobs.length },
     });
   }
   if (request.method === "GET" && url.pathname === "/v1/ai-settings") {
@@ -1146,6 +1178,24 @@ const server = http.createServer(async (request, response) => {
       return json(response, verification.status === "passed" ? 200 : 422, { verification });
     } catch {
       return json(response, 400, { error: "功能验收请求格式不正确" });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/v1/import-analysis") {
+    try {
+      if (aiSettings.status !== "connected" || !aiSettings.apiKey) return json(response, 409, { error: "请先在AI中枢配置模型并通过连接测试" });
+      const payload = await readJson(request);
+      const items = Array.isArray(payload.items) ? payload.items.slice(0, 500) : [];
+      if (!items.length) return json(response, 400, { error: "没有可分析的导入内容" });
+      const results = await analyzeImportedItems(items, payload.task ?? {});
+      return json(response, 200, {
+        results,
+        items: results.filter((result) => result?.status === "accepted").map((result) => result.item),
+        accepted: results.filter((result) => result?.status === "accepted").length,
+        filtered: results.filter((result) => result?.status === "filtered").length,
+        failed: results.filter((result) => result?.status === "failed").length,
+      });
+    } catch (error) {
+      return json(response, 400, { error: error instanceof Error ? error.message : "导入分析失败" });
     }
   }
   if (request.method === "POST" && url.pathname === "/v1/search-tasks") {

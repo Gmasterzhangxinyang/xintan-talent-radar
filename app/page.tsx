@@ -129,6 +129,16 @@ type AiBrainSettings = {
   policy: { maxStepsPerSource: number; maxItemsPerSource: number; allowOpenDetail: boolean; allowReadComments: boolean; allowRefineSearch: boolean; allowCrossPlatformSuggestion: boolean };
 };
 
+type ImportCandidate = {
+  source: string; externalId?: string; author?: string; authorId?: string; publishedAt?: string;
+  title?: string; snippet: string; fullText?: string; url: string; raw?: unknown;
+};
+
+type ImportPreview = {
+  fileName: string; format: string; total: number; accepted: number; failed: number;
+  items: ImportCandidate[]; errors: Array<{ rowNumber: number; code: string; message: string }>;
+};
+
 const EMPTY_STATE: AppState = { tasks: [], leads: [], runs: [], sources: [] };
 const ALL_SOURCES = ["知乎"];
 const SOCIAL_SOURCES = ["知乎"];
@@ -157,6 +167,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [showStartupSetup, setShowStartupSetup] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -439,6 +450,7 @@ export default function Home() {
               onViewLead={(lead) => setSelectedLead(lead)}
               onNavigate={setView}
               onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
+              onImport={() => setShowImportModal(true)}
             />
           )}
           {view === "tasks" && (
@@ -489,6 +501,19 @@ export default function Home() {
             await loadState();
             setView("tasks");
             setToast(wasEditing ? "检索任务已更新" : "检索任务已创建，可立即运行");
+          }}
+        />
+      )}
+
+      {showImportModal && (
+        <ImportModal
+          tasks={data.tasks}
+          onClose={() => setShowImportModal(false)}
+          onImported={async (message) => {
+            setShowImportModal(false);
+            await loadState();
+            setView("leads");
+            setToast(message);
           }}
         />
       )}
@@ -660,20 +685,21 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
   );
 }
 
-function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate, onEdit, onToggle, onDelete }: {
+function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate, onImport, onEdit, onToggle, onDelete }: {
   tasks: Task[];
   runningTask: string | null;
   runProgress: number;
   liveJobs: Record<string, LocalJob>;
   onRun: (task: Task) => void;
   onCreate: () => void;
+  onImport: () => void;
   onEdit: (task: Task) => void;
   onToggle: (task: Task) => void;
   onDelete: (task: Task) => void;
 }) {
   return (
     <section>
-      <div className="section-intro"><div><p className="eyebrow">SEARCHES</p><h2>Search missions</h2><p>从 JD 建立持续检索，配置技术栈、企业、求职信号、时间范围和排除规则。</p></div><button className="primary-button" onClick={onCreate}>New search</button></div>
+      <div className="section-intro"><div><p className="eyebrow">SEARCHES</p><h2>Search missions</h2><p>从 JD 建立持续检索，配置技术栈、企业、求职信号、时间范围和排除规则。</p></div><div className="section-actions"><button className="ghost-button" onClick={onImport}>Import data</button><button className="primary-button" onClick={onCreate}>New search</button></div></div>
       {(runningTask || Object.keys(liveJobs).length > 0) && <AnalysisWorkspace jobs={liveJobs} running={Boolean(runningTask)} />}
       <div className="task-grid">
         {tasks.map((task) => (
@@ -1054,14 +1080,105 @@ function SourcesView({ sources, jobs, onChanged }: { sources: Source[]; jobs: No
   );
 }
 
+function ImportModal({ tasks, onClose, onImported }: { tasks: Task[]; onClose: () => void; onImported: (message: string) => Promise<void> }) {
+  const [taskId, setTaskId] = useState(tasks[0]?.id ?? "");
+  const [mode, setMode] = useState<"file" | "url">("file");
+  const [file, setFile] = useState<File | null>(null);
+  const [urlText, setUrlText] = useState("");
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState("");
+  const [error, setError] = useState("");
+  const selectedTask = tasks.find((task) => task.id === taskId);
+
+  async function previewImport() {
+    if (!taskId) { setError("请先创建并选择一个检索任务"); return; }
+    if (mode === "file" && !file) { setError("请选择 CSV、TSV、TXT 或 XLSX 文件"); return; }
+    if (mode === "url" && !urlText.trim()) { setError("请粘贴至少一条 URL 和原文片段"); return; }
+    setBusy(true); setError(""); setPhase("正在校验字段和逐行错误…");
+    try {
+      let body: BodyInit;
+      const headers: HeadersInit = {};
+      if (mode === "file") { const form = new FormData(); form.set("file", file as File); body = form; }
+      else { headers["Content-Type"] = "application/json"; body = JSON.stringify({ urlText }); }
+      const response = await fetch("/api/imports/preview", { method: "POST", headers, body });
+      const result = await response.json() as ImportPreview & { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "导入预览失败");
+      setPreview(result); setPhase(`预览完成：${result.accepted} 条可分析，${result.failed} 条需修正`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "导入预览失败"); setPhase(""); }
+    finally { setBusy(false); }
+  }
+
+  async function analyzeAndCommit() {
+    if (!preview || !selectedTask) return;
+    setBusy(true); setError(""); setPhase(`本机 AI 正在分析 ${preview.items.length} 条公开内容…`);
+    try {
+      const analysisResponse = await fetch(`${LOCAL_ASSISTANT_URL}/v1/import-analysis`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: preview.items, task: selectedTask }),
+      });
+      const analyzed = await analysisResponse.json() as {
+        items?: ImportCandidate[]; accepted?: number; filtered?: number; failed?: number; error?: string;
+        results?: Array<{ status: string; reason?: string; item?: ImportCandidate }>;
+      };
+      if (!analysisResponse.ok) throw new Error(analyzed.error ?? "本机 AI 分析失败");
+      setPhase("AI 分析完成，正在去重并写入线索库…");
+      const commitResponse = await fetch("/api/imports/commit", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId, fileName: preview.fileName, format: preview.format, items: analyzed.items ?? [],
+          previewTotal: preview.total, previewFailed: preview.failed,
+          analysisFiltered: analyzed.filtered ?? 0, analysisFailed: analyzed.failed ?? 0,
+          rowReports: [
+            ...preview.errors.map((item) => ({ rowNumber: item.rowNumber, status: "failed", errorCode: item.code, errorMessage: item.message })),
+            ...(analyzed.results ?? []).map((item, index) => ({
+              rowNumber: Number(((preview.items[index]?.raw as { importRowNumber?: number } | undefined)?.importRowNumber) ?? index + 2),
+              status: item.status === "accepted" ? "processed" : item.status,
+              errorCode: item.status === "failed" ? "ai_analysis_failed" : item.status === "filtered" ? "ai_filtered" : "",
+              errorMessage: item.reason ?? "",
+            })),
+          ],
+        }),
+      });
+      const committed = await commitResponse.json() as { imported?: number; duplicated?: number; filtered?: number; failed?: number; error?: string };
+      if (!commitResponse.ok) throw new Error(committed.error ?? "导入入库失败");
+      await onImported(`导入完成：新增 ${committed.imported ?? 0}，重复 ${committed.duplicated ?? 0}，过滤 ${committed.filtered ?? 0}，失败 ${committed.failed ?? 0}`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "分析与入库失败"); setPhase(""); }
+    finally { setBusy(false); }
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onClose(); }}>
+    <section className="task-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+      <div className="modal-head"><div><p className="eyebrow">CONTROLLED INGESTION</p><h2 id="import-modal-title">导入公开内容</h2></div><button className="close-button" disabled={busy} onClick={onClose} aria-label="关闭">×</button></div>
+      <div className="modal-body import-body">
+        <div className="import-note"><b>预览 → AI 分析 → 去重入库</b><span>文件只在本次请求中解析；系统不会保存原始文件。AI 引用必须能在导入原文中核验。</span></div>
+        <label><span>关联检索任务</span><select value={taskId} onChange={(event) => { setTaskId(event.target.value); setPreview(null); }}><option value="">选择任务</option>{tasks.map((task) => <option value={task.id} key={task.id}>{task.name}</option>)}</select></label>
+        <div className="import-tabs"><button className={mode === "file" ? "active" : ""} onClick={() => { setMode("file"); setPreview(null); }}>CSV / XLSX</button><button className={mode === "url" ? "active" : ""} onClick={() => { setMode("url"); setPreview(null); }}>URL list</button><a href="/api/imports/template">Download template</a></div>
+        {mode === "file" ? <label className="file-drop"><input type="file" accept=".csv,.tsv,.txt,.xlsx" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setPreview(null); }} /><b>{file?.name ?? "Choose a data file"}</b><span>CSV / TSV / TXT / XLSX · Maximum 5 MB · Up to 2,000 rows</span></label> : <label><span>每行一条：URL | 原文片段 | 作者 | 发布时间</span><textarea rows={7} value={urlText} onChange={(event) => { setUrlText(event.target.value); setPreview(null); }} placeholder="https://www.zhihu.com/question/... | 公开原文片段 | 公开昵称 | 2026-08-28" /></label>}
+        {preview && <section className="import-preview">
+          <div className="import-metrics"><span><small>Total</small><b>{preview.total}</b></span><span><small>Ready</small><b>{preview.accepted}</b></span><span><small>Errors</small><b>{preview.failed}</b></span></div>
+          <div className="import-preview-table"><table><thead><tr><th>Row</th><th>Source</th><th>Author</th><th>Content preview</th><th>Status</th></tr></thead><tbody>
+            {preview.items.slice(0, 10).map((item, index) => <tr key={`${item.url}-${index}`}><td>{String((item.raw as { importRowNumber?: number } | undefined)?.importRowNumber ?? index + 2)}</td><td>{item.source}</td><td>{item.author || "未公开"}</td><td>{item.snippet}</td><td><span className="import-ok">Ready</span></td></tr>)}
+            {preview.errors.slice(0, 10).map((item) => <tr key={`error-${item.rowNumber}`}><td>{item.rowNumber}</td><td>—</td><td>—</td><td>{item.message}</td><td><span className="import-error">Error</span></td></tr>)}
+          </tbody></table></div>
+          {preview.total > 10 && <small className="import-more">仅展示前 10 条有效记录和前 10 条错误；所有记录都会被处理。</small>}
+        </section>}
+        {phase && <div className="import-phase"><i />{phase}</div>}
+        {error && <div className="form-error" role="alert">{error}</div>}
+      </div>
+      <div className="modal-actions"><button className="ghost-button" disabled={busy} onClick={onClose}>Cancel</button>{!preview ? <button className="primary-button" disabled={busy} onClick={() => void previewImport()}>{busy ? "Validating…" : "Preview data"}</button> : <><button className="ghost-button" disabled={busy} onClick={() => setPreview(null)}>Back</button><button className="primary-button" disabled={busy || preview.accepted === 0} onClick={() => void analyzeAndCommit()}>{busy ? "Analyzing…" : `Analyze & import ${preview.accepted}`}</button></>}</div>
+    </section>
+  </div>;
+}
+
 function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: () => void; onCreated: () => Promise<void> }) {
-  const [name, setName] = useState(task?.name ?? "模拟IC设计工程师");
-  const [jd, setJd] = useState(task?.jd ?? "模拟IC设计工程师，5年以上经验，熟悉PLL、ADC或电源管理芯片，有完整流片经验，工作地点上海。");
+  const [name, setName] = useState(task?.name ?? "");
+  const [jd, setJd] = useState(task?.jd ?? "");
   const [techKeywords, setTechKeywords] = useState<string[]>(task?.techKeywords ?? []);
   const [techKeywordText, setTechKeywordText] = useState((task?.techKeywords ?? []).join("、"));
-  const [companies, setCompanies] = useState((task?.companyKeywords ?? ["海思", "圣邦微", "思瑞浦"]).join("、"));
-  const [signals, setSignals] = useState((task?.signalKeywords ?? ["看机会", "准备离职", "团队调整", "扩招", "流片延期"]).join("、"));
-  const [excludes, setExcludes] = useState((task?.excludeKeywords ?? ["培训", "招生", "广告"]).join("、"));
+  const [companies, setCompanies] = useState((task?.companyKeywords ?? []).join("、"));
+  const [signals, setSignals] = useState((task?.signalKeywords ?? []).join("、"));
+  const [excludes, setExcludes] = useState((task?.excludeKeywords ?? []).join("、"));
   const [authorBlacklist, setAuthorBlacklist] = useState((task?.authorBlacklist ?? []).join("、"));
   const [companyBlacklist, setCompanyBlacklist] = useState((task?.companyBlacklist ?? []).join("、"));
   const sources = ["知乎"];
@@ -1122,14 +1239,14 @@ function TaskModal({ task, onClose, onCreated }: { task: Task | null; onClose: (
       <section className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
         <div className="modal-head"><div><p className="eyebrow">SEARCH MISSION</p><h2 id="task-modal-title">{task ? "编辑检索任务" : "创建检索任务"}</h2></div><button className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
         <div className="modal-body">
-          <label><span>任务名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label><span>职位描述 JD</span><textarea rows={5} value={jd} onChange={(event) => setJd(event.target.value)} /></label>
+          <label><span>任务名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：上海数字验证人才" /></label>
+          <label><span>职位描述 JD</span><textarea rows={5} value={jd} onChange={(event) => setJd(event.target.value)} placeholder="粘贴客户提供的真实 JD；保存前可检查并修改拆解结果。" /></label>
           <button className="analyze-button" disabled={analyzing} onClick={() => void analyze()}>{analyzing ? "正在拆解…" : "✦ AI拆解技术栈和检索词"}</button>
           {techKeywords.length > 0 && <div className="keyword-box"><b>识别及扩展出的技术词</b><div className="tag-row">{techKeywords.map((word) => <span key={word}>{word}</span>)}</div><small>服务端芯片行业词库会扩展缩写、同义词和EDA工具名称。</small></div>}
           <label><span>技术栈关键词（可编辑）</span><input value={techKeywordText} onChange={(event) => setTechKeywordText(event.target.value)} placeholder="例如：UVM、SystemVerilog、VCS、SoC验证" /></label>
-          <label><span>目标企业</span><input value={companies} onChange={(event) => setCompanies(event.target.value)} /></label>
-          <label><span>求职与企业信号关键词</span><input value={signals} onChange={(event) => setSignals(event.target.value)} /></label>
-          <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} /></label>
+          <label><span>目标企业</span><input value={companies} onChange={(event) => setCompanies(event.target.value)} placeholder="仅填写本任务需要关注的企业" /></label>
+          <label><span>求职与企业信号关键词</span><input value={signals} onChange={(event) => setSignals(event.target.value)} placeholder="例如：看机会、团队调整、项目收尾" /></label>
+          <label><span>内容黑名单关键词</span><input value={excludes} onChange={(event) => setExcludes(event.target.value)} placeholder="例如：培训、课程、广告" /></label>
           <div className="form-grid"><label><span>作者黑名单</span><input value={authorBlacklist} onChange={(event) => setAuthorBlacklist(event.target.value)} /></label><label><span>企业黑名单</span><input value={companyBlacklist} onChange={(event) => setCompanyBlacklist(event.target.value)} /></label></div>
           <div className="form-grid"><label><span>扫描计划</span><select value={schedule} onChange={(event) => setSchedule(event.target.value)}><option>每天 09:00</option><option>每天 18:00</option><option>每周一 10:00</option><option>仅手动运行</option></select></label><label><span>时间范围</span><select value={timeRange} onChange={(event) => setTimeRange(event.target.value)}><option>近7天</option><option>近30天</option><option>近90天</option></select></label></div>
           <fieldset className="source-depth-fieldset"><legend>知乎深读范围</legend><p>默认最新优先：先用当前年月检索，并在结果页按发布时间排序、预过滤超期内容；之后才打开详情读取正文、评论、作者和原始链接。</p><div className="source-depth-grid"><label className="enabled"><span>知乎 · 最新优先</span><input aria-label="知乎深读条数" type="number" min="1" max="50" value={sourceLimits.知乎} onChange={(event) => setSourceLimits({ 知乎: Math.max(1, Math.min(50, Number(event.target.value) || 1)) })} /><em>条 / 次</em></label></div></fieldset>
