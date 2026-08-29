@@ -9,7 +9,8 @@ const migrations = [
   "0000_same_agent_zero.sql", "0001_seed-validation-data.sql", "0002_backend_pipeline.sql",
   "0003_connector_truth.sql", "0004_connector_settings.sql", "0005_remove_eetop.sql",
   "0006_analysis_audit.sql", "0007_source_deep_read_limits.sql", "0008_zhihu_only.sql",
-  "0009_remove_legacy_seed_data.sql", "0010_global_content_and_analysis.sql", "0011_import_batches.sql",
+  "0009_remove_legacy_seed_data.sql", "0010_global_content_and_analysis.sql", "0011_import_batches.sql", "0012_run_locks.sql",
+  "0013_analysis_request_audit.sql",
 ];
 
 test("applies every forward migration to a fresh SQLite database", () => {
@@ -20,7 +21,7 @@ test("applies every forward migration to a fresh SQLite database", () => {
     execFileSync("sqlite3", [database], { input: readFileSync(join(project, "drizzle", migration), "utf8") });
   }
   const tables = execFileSync("sqlite3", [database, "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name;"], { encoding: "utf8" });
-  for (const table of ["raw_items", "legacy_raw_items", "task_item_matches", "analyses", "run_source_stats", "run_events"]) {
+  for (const table of ["raw_items", "legacy_raw_items", "task_item_matches", "analyses", "run_source_stats", "run_events", "task_run_locks"]) {
     assert.match(tables, new RegExp(`^${table}$`, "m"));
   }
   assert.equal(execFileSync("sqlite3", [database, "SELECT COUNT(*) FROM tasks;"], { encoding: "utf8" }).trim(), "0");
@@ -28,13 +29,16 @@ test("applies every forward migration to a fresh SQLite database", () => {
   const rawColumns = execFileSync("sqlite3", [database, "SELECT name FROM pragma_table_info('raw_items');"], { encoding: "utf8" });
   assert.match(rawColumns, /^canonical_url$/m);
   assert.doesNotMatch(rawColumns, /^task_id$/m);
+  const analysisColumns = execFileSync("sqlite3", [database, "SELECT name FROM pragma_table_info('analyses');"], { encoding: "utf8" });
+  for (const column of ["response_id", "latency_ms", "retry_count", "recommended_action"]) assert.match(analysisColumns, new RegExp(`^${column}$`, "m"));
 });
 
 test("migrates task-scoped legacy rows into one global item without orphan matches", () => {
   const directory = mkdtempSync(join(tmpdir(), "xintan-legacy-migration-"));
   const database = join(directory, "test.sqlite");
   const project = resolve(import.meta.dirname, "../..");
-  for (const migration of migrations.slice(0, -2)) {
+  const globalContentMigration = migrations.indexOf("0010_global_content_and_analysis.sql");
+  for (const migration of migrations.slice(0, globalContentMigration)) {
     execFileSync("sqlite3", [database], { input: readFileSync(join(project, "drizzle", migration), "utf8") });
   }
   const setup = `

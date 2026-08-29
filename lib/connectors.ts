@@ -1,4 +1,3 @@
-import { env } from "cloudflare:workers";
 import type { CandidateItem, TaskRecord } from "./types";
 import { parseStringArray, unique } from "./json";
 import { loadConnectorSettings, validateAgentEndpoint } from "./connector-settings";
@@ -38,6 +37,7 @@ export async function collectPublicForum(source: string, task: TaskRecord): Prom
 }
 
 export async function dispatchComputerAgent(args: { db: D1Database; task: TaskRecord; source: string; callbackBase: string }) {
+  const { env } = await import("cloudflare:workers");
   const config = env as unknown as Record<string, unknown>;
   const saved = await loadConnectorSettings(args.db);
   const endpoint = saved?.endpoint || (typeof config.COMPUTER_AGENT_URL === "string" ? config.COMPUTER_AGENT_URL.replace(/\/$/, "") : "");

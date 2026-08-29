@@ -1,6 +1,7 @@
 import { ensureDatabase, getD1 } from "../../../db/bootstrap";
 import { parseJd } from "../../../lib/jd-parser";
 import { runTask } from "../../../lib/pipeline";
+import { isRunStatus, RUN_STATUS_LABELS } from "../../../lib/runs/state-machine";
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string") return fallback;
@@ -89,13 +90,15 @@ function normalizeLead(row: Record<string, unknown>) {
 }
 
 function normalizeRun(row: Record<string, unknown>) {
+  const status = String(row.status ?? "");
   return {
     id: row.id,
     taskId: row.task_id,
     taskName: row.task_name,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
-    status: row.status,
+    status,
+    statusLabel: isRunStatus(status) ? RUN_STATUS_LABELS[status] : status,
     fetched: row.fetched,
     filtered: row.filtered,
     deduped: row.deduped,
@@ -129,6 +132,25 @@ function normalizeConnectorJob(row: Record<string, unknown>) {
   };
 }
 
+function normalizeRunSourceStat(row: Record<string, unknown>) {
+  return {
+    runId: row.run_id, source: row.source, status: row.status,
+    discovered: row.discovered, timeFiltered: row.time_filtered,
+    blacklistFiltered: row.blacklist_filtered, advertisementFiltered: row.advertisement_filtered,
+    deduped: row.deduped, matched: row.matched, analyzed: row.analyzed,
+    kept: row.kept, failed: row.failed, startedAt: row.started_at,
+    finishedAt: row.finished_at, errorCode: row.error_code, errorMessage: row.error_message,
+  };
+}
+
+function normalizeRunEvent(row: Record<string, unknown>) {
+  return {
+    id: row.id, runId: row.run_id, level: row.level, stage: row.stage,
+    source: row.source, message: row.message, metadata: parseJson(row.metadata, {}),
+    createdAt: row.created_at,
+  };
+}
+
 export async function GET() {
   try {
     await ensureDatabase();
@@ -149,8 +171,8 @@ export async function GET() {
       runs: runRows.results.map((row) => normalizeRun(row as Record<string, unknown>)),
       sources: sourceRows.results.map((row) => normalizeSource(row as Record<string, unknown>)),
       connectorJobs: connectorRows.results.map((row) => normalizeConnectorJob(row as Record<string, unknown>)),
-      runSourceStats: sourceStatRows.results,
-      runEvents: eventRows.results,
+      runSourceStats: sourceStatRows.results.map((row) => normalizeRunSourceStat(row as Record<string, unknown>)),
+      runEvents: eventRows.results.map((row) => normalizeRunEvent(row as Record<string, unknown>)),
     });
   } catch (error) {
     return Response.json(

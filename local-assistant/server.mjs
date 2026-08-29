@@ -158,6 +158,7 @@ const AI_DECISION_SCHEMA = {
   type: "object", additionalProperties: false,
   properties: {
     decision: { type: "string", enum: ["keep", "filter", "needs_more"] },
+    contentType: { type: "string", enum: ["talent", "company_intelligence", "both", "industry_discussion", "recruitment_ad", "marketing", "irrelevant", "uncertain"] },
     reasoningSummary: { type: "string" },
     nextAction: { type: "string", enum: ["keep", "filter", "open_source", "read_comments", "refine_search", "scroll_next", "cross_check", "stop"] },
     actionReason: { type: "string" }, searchQuery: { type: "string" }, crossCheckPlatform: { type: "string" },
@@ -166,10 +167,18 @@ const AI_DECISION_SCHEMA = {
     evidenceQuotes: { type: "array", items: { type: "string" }, maxItems: 5 },
     intent: { type: "string", enum: ["强", "中", "无"] },
     intelligenceType: { type: "string", enum: ["人才线索", "企业情报", "无效内容"] },
+    companyIntelligenceType: { type: "string", enum: ["layoff", "hiring_expansion", "project_change", "tapeout_issue", "team_change", "business_change", "unknown"] },
+    jobMatchScore: { type: "integer", minimum: 0, maximum: 100 },
+    intentScore: { type: "integer", minimum: 0, maximum: 100 },
+    companyIntelScore: { type: "integer", minimum: 0, maximum: 100 },
+    identityConfidence: { type: "number", minimum: 0, maximum: 1 },
+    evidenceConfidence: { type: "number", minimum: 0, maximum: 1 },
+    uncertainty: { type: "array", items: { type: "string" }, maxItems: 6 },
+    recommendedAction: { type: "string", enum: ["human_review", "follow_up", "monitor", "ignore"] },
     score: { type: "integer", minimum: 0, maximum: 100 }, priority: { type: "string", enum: ["A", "B", "C"] },
     confidence: { type: "number", minimum: 0, maximum: 1 }, stopReason: { type: "string" },
   },
-  required: ["decision", "reasoningSummary", "nextAction", "actionReason", "searchQuery", "crossCheckPlatform", "tags", "matchedKeywords", "evidenceQuotes", "intent", "intelligenceType", "score", "priority", "confidence", "stopReason"],
+  required: ["decision", "contentType", "reasoningSummary", "nextAction", "actionReason", "searchQuery", "crossCheckPlatform", "tags", "matchedKeywords", "evidenceQuotes", "intent", "intelligenceType", "companyIntelligenceType", "jobMatchScore", "intentScore", "companyIntelScore", "identityConfidence", "evidenceConfidence", "uncertainty", "recommendedAction", "score", "priority", "confidence", "stopReason"],
 };
 
 function responseOutputText(payload) {
@@ -192,7 +201,7 @@ async function askAiBrain(observation) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${aiSettings.apiKey}` },
     body: JSON.stringify({
       model: aiSettings.model, store: false, max_output_tokens: 900,
-      instructions: `你是芯片设计行业猎头情报Agent的中央决策大脑。只分析公开或已授权内容。每个候选都已经由电脑Agent打开站内详情并读取可见正文与公开评论，你必须基于详情证据判断，不能只复述列表摘要。evidenceQuotes应给出1至5条简短原文证据；若证据不足则明确指出。你只能从给定的安全动作中选择下一步，绝不能私信、发布、点赞、关注、上传、下载、输入密码/验证码、绕过验证或离开平台白名单域名。输出简短可审计的决策摘要，不输出隐藏思维链。`,
+      instructions: `你是芯片设计行业猎头情报Agent的中央决策大脑。只分析公开或已授权内容。每个候选都已经由电脑Agent打开站内详情并读取可见正文与公开评论，你必须基于详情证据判断，不能只复述列表摘要。分别评价岗位匹配、求职意向、企业事件、公开身份可信度和证据充分度；内容可能同时包含人才与企业情报。evidenceQuotes应给出1至5条简短原文证据且必须逐字存在于输入内容；强求职意向与企业事件没有证据时必须降为uncertain。不要根据昵称、头像或地域推断敏感属性。你只能从给定的安全动作中选择下一步，绝不能私信、发布、点赞、关注、上传、下载、输入密码/验证码、绕过验证或离开平台白名单域名。输出简短可审计的决策摘要，不输出隐藏思维链。`,
       input: [{ role: "user", content: inputContent }],
       text: { format: { type: "json_schema", name: "talent_agent_decision", strict: true, schema: AI_DECISION_SCHEMA } },
     }),
@@ -206,9 +215,11 @@ async function askAiBrain(observation) {
 
 async function askAiBrainWithRetry(observation) {
   let lastError;
+  const startedAt = Date.now();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await askAiBrain(attempt === 0 ? observation : { ...observation, visualFrames: [] });
+      const decision = await askAiBrain(attempt === 0 ? observation : { ...observation, visualFrames: [] });
+      return { ...decision, latencyMs: Date.now() - startedAt, retryCount: attempt };
     } catch (error) {
       lastError = error;
       if (attempt === 0) await new Promise((resolveRetry) => setTimeout(resolveRetry, 700));
@@ -241,8 +252,13 @@ async function analyzeImportedItems(items, task) {
           status: "accepted",
           item: { ...item, raw: { ...(item.raw && typeof item.raw === "object" ? item.raw : {}), aiAnalysis: {
             tags: decision.tags, intent: decision.intent, intelligenceType: decision.intelligenceType,
+            contentType: decision.contentType, companyIntelligenceType: decision.companyIntelligenceType,
+            jobMatchScore: decision.jobMatchScore, intentScore: decision.intentScore, companyIntelScore: decision.companyIntelScore,
+            identityConfidence: decision.identityConfidence, evidenceConfidence: decision.evidenceConfidence,
+            uncertainty: decision.uncertainty, recommendedAction: decision.recommendedAction,
             score: decision.score, reasoningSummary: decision.reasoningSummary, companyNote: decision.reasoningSummary,
             evidenceQuotes: decision.evidenceQuotes, confidence: decision.confidence, model: decision.model, responseId: decision.responseId,
+            latencyMs: decision.latencyMs, retryCount: decision.retryCount,
           } } },
         } : { status: "filtered", reason: decision.reasoningSummary };
       } catch (error) {
@@ -763,6 +779,7 @@ async function processSearchJob(job, queries) {
     const perQueryQuota = Math.max(1, Math.min(2, Number(job.itemsPerQuery ?? 2)));
     const maxSearchScreens = Math.min(60, Math.max(12, maxItems * 3, searchPlan.length * 3));
     for (let screen = 0; screen < maxSearchScreens && analysisTrace.length < maxItems && agentSteps < Math.max(aiSettings.policy.maxStepsPerSource, maxItems * 2); screen += 1) {
+      if (searchJobs.get(job.jobId)?.status === "cancelled") return;
       if (page.isClosed()) {
         page = await openControlledPage(searchUrl(job.platform, activeQuery));
         await prepareSearchPage(page, job.platform, activeQuery);
@@ -801,6 +818,7 @@ async function processSearchJob(job, queries) {
       if (candidates.length) emptyScreens = 0;
       else emptyScreens += 1;
       for (const candidate of candidates) {
+        if (searchJobs.get(job.jobId)?.status === "cancelled") return;
         const parsed = new URL(candidate.url);
         seenUrls.add(parsed.toString());
         seenSnippets.add(candidate.snippet.replace(/\s+/g, " ").trim().slice(0, 240));
@@ -874,7 +892,9 @@ async function processSearchJob(job, queries) {
             decision: "filter", reasoningSummary: hardFilter.reasons.join("；"), nextAction: "scroll_next",
             actionReason: "硬过滤规则在AI判断前生效，继续处理下一候选", searchQuery: "", crossCheckPlatform: "",
             tags: ["规则过滤"], matchedKeywords: hardFilter.excludeMatches, evidenceQuotes: [], intent: "无", intelligenceType: "无效内容",
-            score: 0, priority: "C", confidence: 1, stopReason: "命中时间或黑名单规则", model: "policy-engine", responseId: "",
+            contentType: "irrelevant", companyIntelligenceType: "unknown", jobMatchScore: 0, intentScore: 0, companyIntelScore: 0,
+            identityConfidence: 0, evidenceConfidence: 1, uncertainty: [], recommendedAction: "ignore",
+            score: 0, priority: "C", confidence: 1, stopReason: "命中时间或黑名单规则", model: "policy-engine", responseId: "", latencyMs: 0, retryCount: 0,
           };
         } else try {
           brainDecision = await askAiBrainWithRetry(aiObservation);
@@ -884,7 +904,9 @@ async function processSearchJob(job, queries) {
             decision: "needs_more", reasoningSummary: `正文与公开信息已采集，但AI中枢两次调用失败，本条进入人工复核：${aiFailure.slice(0, 160)}`,
             nextAction: "scroll_next", actionReason: "单条AI故障不终止整轮任务，继续处理下一候选", searchQuery: "", crossCheckPlatform: "",
             tags: ["AI待复核"], matchedKeywords: [], evidenceQuotes: [], intent: "无", intelligenceType: "无效内容",
-            score: 0, priority: "C", confidence: 0, stopReason: "AI调用失败", model: aiSettings.model, responseId: "",
+            contentType: "uncertain", companyIntelligenceType: "unknown", jobMatchScore: 0, intentScore: 0, companyIntelScore: 0,
+            identityConfidence: 0, evidenceConfidence: 0, uncertainty: ["AI调用失败"], recommendedAction: "human_review",
+            score: 0, priority: "C", confidence: 0, stopReason: "AI调用失败", model: aiSettings.model, responseId: "", latencyMs: 0, retryCount: 1,
           };
         }
         agentSteps += 2;
@@ -904,6 +926,8 @@ async function processSearchJob(job, queries) {
           reasoningSummary: brainDecision.reasoningSummary, nextAction: executedAction, actionReason: brainDecision.actionReason,
           confidence: brainDecision.confidence, stopReason: brainDecision.stopReason, policyStatus: policy.reason,
           model: brainDecision.model, responseId: brainDecision.responseId, evidenceQuotes: brainDecision.evidenceQuotes, detailExcerpt,
+          latencyMs: brainDecision.latencyMs, retryCount: brainDecision.retryCount, contentType: brainDecision.contentType,
+          companyIntelligenceType: brainDecision.companyIntelligenceType, recommendedAction: brainDecision.recommendedAction,
           commentRead: commentTexts.length, commentTarget: Math.max(1, Math.min(50, Number(job.commentTarget ?? 20))), contentKind: hasVideo ? "视频" : "图文",
           aiError: aiFailure,
         };
@@ -915,9 +939,14 @@ async function processSearchJob(job, queries) {
             author: publicMeta.author, authorId: publicMeta.authorId, publishedAt: publicMeta.publishedAt, snippet: detailExcerpt || item.snippet,
             raw: { aiAnalysis: {
               tags: brainDecision.tags, intent: brainDecision.intent, intelligenceType: brainDecision.intelligenceType,
+              contentType: brainDecision.contentType, companyIntelligenceType: brainDecision.companyIntelligenceType,
+              jobMatchScore: brainDecision.jobMatchScore, intentScore: brainDecision.intentScore, companyIntelScore: brainDecision.companyIntelScore,
+              identityConfidence: brainDecision.identityConfidence, evidenceConfidence: brainDecision.evidenceConfidence,
+              uncertainty: brainDecision.uncertainty, recommendedAction: brainDecision.recommendedAction,
               score: brainDecision.score, reasoningSummary: brainDecision.reasoningSummary,
               companyNote: brainDecision.reasoningSummary, evidenceQuotes: brainDecision.evidenceQuotes,
               confidence: brainDecision.confidence, model: brainDecision.model, responseId: brainDecision.responseId,
+              latencyMs: brainDecision.latencyMs, retryCount: brainDecision.retryCount,
             } },
           });
         }
@@ -994,6 +1023,7 @@ async function processSearchJob(job, queries) {
       await page.waitForTimeout(1100);
     }
     const title = await page.title().catch(() => "");
+    if (searchJobs.get(job.jobId)?.status === "cancelled") return;
     const finalPageUrl = page.isClosed() ? searchUrl(job.platform, activeQuery) : page.url();
     const needsLogin = /登录|sign in|login/i.test(`${title} ${finalPageUrl}`) && results.length === 0;
     const targetReached = analysisTrace.length >= maxItems;

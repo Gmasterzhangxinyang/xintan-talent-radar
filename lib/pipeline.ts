@@ -3,6 +3,7 @@ import { parseStringArray } from "./json";
 import type { CandidateItem, IngestStats, TaskRecord } from "./types";
 import { ingestCandidates } from "./pipeline/ingest";
 import { recordRunEvent } from "./runs/logger";
+import { assertRunTransition, type RunStatus } from "./runs/state-machine";
 
 export { ingestCandidates } from "./pipeline/ingest";
 
@@ -44,8 +45,28 @@ export async function runTask(
   if (task.status !== "active") throw new Error("任务已暂停，请先恢复任务");
   const runId = `run-${crypto.randomUUID()}`;
   const startedAt = new Date().toISOString();
-  await db.prepare("INSERT INTO runs (id, task_id, task_name, started_at, status, message) VALUES (?, ?, ?, ?, '运行中', '连接器正在执行')")
-    .bind(runId, task.id, task.name, startedAt).run();
+  const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString();
+  await db.prepare("DELETE FROM task_run_locks WHERE expires_at < ?").bind(startedAt).run();
+  const lock = await db.prepare("INSERT OR IGNORE INTO task_run_locks (task_id, run_id, acquired_at, expires_at) VALUES (?, ?, ?, ?)")
+    .bind(task.id, runId, startedAt, expiresAt).run();
+  if (Number(lock.meta.changes ?? 0) !== 1) {
+    const existing = await db.prepare("SELECT run_id FROM task_run_locks WHERE task_id=?").bind(task.id).first<{ run_id: string }>();
+    return {
+      runId: existing?.run_id ?? "", status: "already_running", reused: true,
+      fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0,
+      message: "该任务已有扫描正在运行，已返回现有运行记录",
+    };
+  }
+  try {
+    let runStatus: RunStatus = "queued";
+    await db.prepare("INSERT INTO runs (id, task_id, task_name, started_at, status, message) VALUES (?, ?, ?, ?, 'queued', '任务已进入队列')")
+      .bind(runId, task.id, task.name, startedAt).run();
+    const transition = async (next: RunStatus, message: string) => {
+      assertRunTransition(runStatus, next);
+      runStatus = next;
+      await db.prepare("UPDATE runs SET status=?, message=? WHERE id=?").bind(next, message.slice(0, 500), runId).run();
+    };
+  await transition("dispatching", "正在调度知乎连接器");
   await recordRunEvent(db, { runId, stage: "dispatch", message: "任务已进入连接器调度", metadata: { taskId: task.id } });
   const total: IngestStats = { fetched: 0, filtered: 0, deduped: 0, valid: 0, highValue: 0, timeFiltered: 0, blacklistFiltered: 0, advertisementFiltered: 0, matched: 0, analyzed: 0, failed: 0 };
   const messages: string[] = [];
@@ -61,6 +82,8 @@ export async function runTask(
         stats.advertisementFiltered ?? 0, stats.deduped, stats.matched ?? 0, stats.analyzed ?? 0, stats.valid,
         stats.failed ?? 0, startedAt, new Date().toISOString(), errorCode, errorMessage.slice(0, 500)).run();
   };
+  await transition("searching", "正在检索公开内容");
+  await transition("collecting", "正在接收并采集候选内容");
   for (const source of parseStringArray(task.sources)) {
     await recordRunEvent(db, { runId, stage: "search", source, message: `开始处理${source}` });
     const sourceCandidates = localCandidates.filter((item) => item.source === source)
@@ -70,7 +93,7 @@ export async function runTask(
       if (localJob) {
         const jobId = String(localJob.jobId ?? `local-${crypto.randomUUID()}`).slice(0, 160);
         const waitingLogin = localJob.status === "waiting_login";
-        const persistedStatus = waitingLogin ? "waiting_login" : localJob.status === "failed" ? "failed" : localJob.status === "partial" ? "partial" : localJob.status === "completed" ? "completed" : "dispatched";
+        const persistedStatus = waitingLogin ? "waiting_login" : localJob.status === "failed" ? "failed" : localJob.status === "cancelled" ? "cancelled" : localJob.status === "partial" ? "partial" : localJob.status === "completed" ? "completed" : "dispatched";
         const liveViewUrl = String(localJob.liveViewUrl ?? "").startsWith("http://127.0.0.1:8765/") ? String(localJob.liveViewUrl) : "";
         const action = String(localJob.currentAction ?? `已在${source}打开关键词检索`).slice(0, 300);
         await db.prepare(`INSERT OR REPLACE INTO connector_jobs
@@ -96,7 +119,7 @@ export async function runTask(
           messages.push(`${source}:失败(${action})`);
         } else {
           await saveSourceStats(source, { fetched: inspected + prefiltered, filtered: aiFiltered, deduped: 0, valid: 0, highValue: 0 }, persistedStatus);
-          messages.push(`${source}:${waitingLogin ? "等待登录" : `${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered)}，新增0`}`);
+          messages.push(`${source}:${persistedStatus === "cancelled" ? "已取消" : waitingLogin ? "等待登录" : `${mode}搜索页预过滤旧内容${prefiltered}，深读${inspected}/${localJob.targetItems ?? inspected}，AI/规则过滤${Math.max(0, aiFiltered - prefiltered)}，新增0`}`);
         }
         continue;
       }
@@ -121,19 +144,38 @@ export async function runTask(
         : `${source}:失败(${message})`);
     }
   }
+  for (const [next, message] of [
+    ["normalizing", "正在标准化字段"], ["deduplicating", "正在执行全局去重"], ["prefiltering", "正在执行时间和黑名单过滤"],
+    ["matching", "正在计算任务匹配"], ["analyzing", "正在校验 AI 分析与证据"], ["persisting", "正在写入线索与运行统计"],
+  ] as Array<[RunStatus, string]>) await transition(next, message);
   const finishedAt = new Date().toISOString();
   const awaiting = messages.some((message) => message.includes("等待"));
   const failed = messages.some((message) => message.includes("失败"));
-  const status = failed || awaiting ? "部分完成" : messages.some((message) => message.includes("已派发")) ? "已派发" : "完成";
+  const status: RunStatus = failed || awaiting || messages.some((message) => message.includes("已派发") || message.includes("已取消")) ? "partial" : "completed";
+  assertRunTransition(runStatus, status);
   await db.batch([
     db.prepare("UPDATE runs SET finished_at = ?, status = ?, fetched = ?, filtered = ?, deduped = ?, valid = ?, high_value = ?, message = ? WHERE id = ?")
       .bind(finishedAt, status, total.fetched, total.filtered, total.deduped, total.valid, total.highValue, messages.join("；"), runId),
-    db.prepare("UPDATE tasks SET discovered = discovered + ?, high_value = high_value + ?, last_run_at = ?, last_successful_run_at = CASE WHEN ? = '完成' THEN ? ELSE last_successful_run_at END WHERE id = ?")
+    db.prepare("UPDATE tasks SET discovered = discovered + ?, high_value = high_value + ?, last_run_at = ?, last_successful_run_at = CASE WHEN ? = 'completed' THEN ? ELSE last_successful_run_at END WHERE id = ?")
       .bind(total.valid, total.highValue, finishedAt, status, finishedAt, task.id),
     db.prepare(`INSERT INTO task_filters (task_id, schedule_enabled, next_run_at, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET schedule_enabled=excluded.schedule_enabled, next_run_at=excluded.next_run_at, updated_at=excluded.updated_at`)
       .bind(task.id, task.schedule === "仅手动运行" ? 0 : 1, nextScheduledAt(task.schedule), finishedAt),
   ]);
-  await recordRunEvent(db, { runId, stage: "complete", level: status === "完成" ? "info" : "warning", message: status === "完成" ? "任务完成" : "任务部分完成", metadata: total });
-  return { runId, status, ...total, message: messages.join("；") };
+  await recordRunEvent(db, { runId, stage: "complete", level: status === "completed" ? "info" : "warning", message: status === "completed" ? "任务完成" : "任务部分完成", metadata: total });
+    return { runId, status, ...total, message: messages.join("；") };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "运行失败";
+    const finishedAt = new Date().toISOString();
+    await db.prepare("UPDATE runs SET status='failed', finished_at=?, message=? WHERE id=?")
+      .bind(finishedAt, message.slice(0, 500), runId).run();
+    try {
+      await recordRunEvent(db, { runId, stage: "complete", level: "error", message: "任务执行失败", metadata: { error: message } });
+    } catch {
+      // Preserve the original pipeline error even when diagnostic persistence fails.
+    }
+    throw error;
+  } finally {
+    await db.prepare("DELETE FROM task_run_locks WHERE task_id=? AND run_id=?").bind(task.id, runId).run();
+  }
 }

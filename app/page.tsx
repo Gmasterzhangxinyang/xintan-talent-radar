@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type View = "overview" | "tasks" | "leads" | "settings";
+type View = "overview" | "tasks" | "leads" | "runs" | "settings";
 
 type Task = {
   id: string;
@@ -43,6 +43,12 @@ type Lead = {
   evidence: string;
   url: string;
   reviewStatus: string;
+  reviewNote?: string;
+  jobMatchScore?: number;
+  intentScore?: number;
+  intelScore?: number;
+  identityConfidence?: number;
+  evidenceConfidence?: number;
 };
 
 type Run = {
@@ -52,12 +58,25 @@ type Run = {
   startedAt: string;
   finishedAt?: string | null;
   status: string;
+  statusLabel?: string;
   fetched: number;
   filtered: number;
   deduped: number;
   valid: number;
   highValue: number;
   message: string;
+};
+
+type RunSourceStat = {
+  runId: string; source: string; status: string; discovered: number; timeFiltered: number;
+  blacklistFiltered: number; advertisementFiltered: number; deduped: number; matched: number;
+  analyzed: number; kept: number; failed: number; startedAt: string; finishedAt?: string | null;
+  errorCode?: string; errorMessage?: string;
+};
+
+type RunEvent = {
+  id: string; runId: string; level: string; stage: string; source?: string;
+  message: string; metadata?: Record<string, unknown>; createdAt: string;
 };
 
 type Source = {
@@ -95,6 +114,8 @@ type AppState = {
   leads: Lead[];
   runs: Run[];
   sources: Source[];
+  runSourceStats?: RunSourceStat[];
+  runEvents?: RunEvent[];
   connectorJobs?: Array<{
     id: string; taskId: string; source: string; status: string; dispatchedAt: string;
     fetched: number; error: string; progress: number; currentAction: string;
@@ -148,7 +169,8 @@ const NAV_ITEMS: { id: View; label: string; icon: string }[] = [
   { id: "overview", label: "总览", icon: "01" },
   { id: "tasks", label: "检索", icon: "02" },
   { id: "leads", label: "线索", icon: "03" },
-  { id: "settings", label: "设置", icon: "04" },
+  { id: "runs", label: "运行", icon: "04" },
+  { id: "settings", label: "设置", icon: "05" },
 ];
 
 function initials(name: string) {
@@ -342,6 +364,14 @@ export default function Home() {
     }
   }
 
+  async function cancelSearchTask() {
+    const jobs = Object.values(liveJobs).filter((job) => job.jobId && !["completed", "partial", "failed", "cancelled"].includes(job.status));
+    if (!jobs.length) return;
+    await Promise.all(jobs.map((job) => fetch(`${LOCAL_ASSISTANT_URL}/v1/search-tasks/${encodeURIComponent(job.jobId)}/cancel`, { method: "POST" }).catch(() => null)));
+    setLiveJobs((current) => Object.fromEntries(Object.entries(current).map(([source, job]) => [source, { ...job, status: "cancelled", currentAction: "任务已取消" }])));
+    setToast("已发送取消指令，当前步骤结束后会安全停止并保存已完成结果");
+  }
+
   async function changeTaskStatus(task: Task) {
     const nextStatus = task.status === "active" ? "paused" : "active";
     const response = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "toggleTask", taskId: task.id, status: nextStatus }) });
@@ -354,16 +384,16 @@ export default function Home() {
     if (response.ok) { await loadState(); setToast("任务及关联记录已删除"); }
   }
 
-  async function reviewLead(lead: Lead, status: string) {
+  async function reviewLead(lead: Lead, status: string, reviewNote = "") {
     const response = await fetch("/api/state", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "reviewLead", leadId: lead.id, reviewStatus: status }),
+      body: JSON.stringify({ action: "reviewLead", leadId: lead.id, reviewStatus: status, reviewNote }),
     });
     if (response.ok) {
-      setSelectedLead({ ...lead, reviewStatus: status });
+      setSelectedLead({ ...lead, reviewStatus: status, reviewNote });
       await loadState();
-      setToast(status === "已确认" ? "已加入重点跟进" : "已标记为误报");
+      setToast(`线索已标记为${status}`);
     }
   }
 
@@ -450,7 +480,6 @@ export default function Home() {
               onViewLead={(lead) => setSelectedLead(lead)}
               onNavigate={setView}
               onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
-              onImport={() => setShowImportModal(true)}
             />
           )}
           {view === "tasks" && (
@@ -460,7 +489,9 @@ export default function Home() {
               runProgress={runProgress}
               liveJobs={liveJobs}
               onRun={runSearchTask}
+              onCancel={() => void cancelSearchTask()}
               onCreate={() => { setEditingTask(null); setShowTaskModal(true); }}
+              onImport={() => setShowImportModal(true)}
               onEdit={(task) => { setEditingTask(task); setShowTaskModal(true); }}
               onToggle={(task) => void changeTaskStatus(task)}
               onDelete={(task) => void deleteTask(task)}
@@ -486,6 +517,7 @@ export default function Home() {
               onExport={exportExcel}
             />
           )}
+          {view === "runs" && <RunsView runs={data.runs} sourceStats={data.runSourceStats ?? []} events={data.runEvents ?? []} />}
           {view === "settings" && <SettingsView data={data} onChanged={loadState} />}
         </div>
       </section>
@@ -537,7 +569,7 @@ export default function Home() {
         <LeadDrawer
           lead={selectedLead}
           onClose={() => setSelectedLead(null)}
-          onReview={(status) => void reviewLead(selectedLead, status)}
+          onReview={(status, note) => void reviewLead(selectedLead, status, note)}
         />
       )}
 
@@ -616,7 +648,7 @@ function Metric({ label, value, delta, tone }: { label: string; value: string; d
   return <div className={`metric-card ${tone}`}><span>{label}</span><strong>{value}</strong><small>{delta}</small></div>;
 }
 
-function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; running: boolean }) {
+function AnalysisWorkspace({ jobs, running, onCancel }: { jobs: Record<string, LocalJob>; running: boolean; onCancel?: () => void }) {
   const sources = Object.keys(jobs);
   const activeSource = sources.find((source) => ["calling_ai", "analyzing", "reading_comments", "reading_detail"].includes(jobs[source].phase ?? "")) ?? sources.find((source) => jobs[source].status === "running") ?? sources[0] ?? "";
   const [selectedSource, setSelectedSource] = useState("");
@@ -630,7 +662,7 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
     <section className="analysis-workspace" aria-live="polite">
       <div className="analysis-head">
         <div><p className="eyebrow">LIVE ANALYSIS</p><h3>Evidence-first review</h3><span>候选内容必须进入原文，读取正文与公开评论后，AI 才会形成结论。</span></div>
-        <div className={`analysis-running-state ${running ? "active" : "complete"}`}><i />{running ? "分析进行中" : "本轮分析记录"}</div>
+        <div className="analysis-head-actions"><div className={`analysis-running-state ${running ? "active" : "complete"}`}><i />{running ? "分析进行中" : "本轮分析记录"}</div>{running && onCancel && <button className="analysis-cancel" onClick={onCancel}>安全停止</button>}</div>
       </div>
       <div className="analysis-source-tabs" role="tablist" aria-label="平台分析记录">
         {sources.map((name) => {
@@ -685,12 +717,13 @@ function AnalysisWorkspace({ jobs, running }: { jobs: Record<string, LocalJob>; 
   );
 }
 
-function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate, onImport, onEdit, onToggle, onDelete }: {
+function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCancel, onCreate, onImport, onEdit, onToggle, onDelete }: {
   tasks: Task[];
   runningTask: string | null;
   runProgress: number;
   liveJobs: Record<string, LocalJob>;
   onRun: (task: Task) => void;
+  onCancel: () => void;
   onCreate: () => void;
   onImport: () => void;
   onEdit: (task: Task) => void;
@@ -700,7 +733,7 @@ function TasksView({ tasks, runningTask, runProgress, liveJobs, onRun, onCreate,
   return (
     <section>
       <div className="section-intro"><div><p className="eyebrow">SEARCHES</p><h2>Search missions</h2><p>从 JD 建立持续检索，配置技术栈、企业、求职信号、时间范围和排除规则。</p></div><div className="section-actions"><button className="ghost-button" onClick={onImport}>Import data</button><button className="primary-button" onClick={onCreate}>New search</button></div></div>
-      {(runningTask || Object.keys(liveJobs).length > 0) && <AnalysisWorkspace jobs={liveJobs} running={Boolean(runningTask)} />}
+      {(runningTask || Object.keys(liveJobs).length > 0) && <AnalysisWorkspace jobs={liveJobs} running={Boolean(runningTask)} onCancel={onCancel} />}
       <div className="task-grid">
         {tasks.map((task) => (
           <article className="task-card" key={task.id}>
@@ -749,7 +782,7 @@ function LeadsView({ leads, tasks, sourceFilter, setSourceFilter, typeFilter, se
         <select aria-label="类型筛选" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option>全部类型</option><option>人才线索</option><option>企业情报</option></select>
         <select aria-label="求职意向筛选" value={intentFilter} onChange={(event) => setIntentFilter(event.target.value)}><option>全部意向</option><option>强</option><option>中</option><option>无</option></select>
         <select aria-label="优先级筛选" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option>全部优先级</option><option>A</option><option>B</option><option>C</option></select>
-        <select aria-label="处理状态筛选" value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value)}><option>全部状态</option><option>待审核</option><option>已确认</option><option>误报</option></select>
+        <select aria-label="处理状态筛选" value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value)}><option>全部状态</option><option>待审核</option><option>已确认</option><option>稍后处理</option><option>已忽略</option><option>误报</option></select>
         <span className="filter-count">找到 {leads.length} 条结果</span>
       </div>
       <div className="lead-table-wrap">
@@ -775,18 +808,50 @@ function LeadsView({ leads, tasks, sourceFilter, setSourceFilter, typeFilter, se
   );
 }
 
-function RunsView({ runs }: { runs: Run[] }) {
+function RunsView({ runs, sourceStats, events }: { runs: Run[]; sourceStats: RunSourceStat[]; events: RunEvent[] }) {
+  const statusClass = (status: string) => status === "completed" ? "success" : status === "failed" ? "failed" : status === "partial" ? "partial" : "running";
+  const statusMark = (status: string) => status === "completed" ? "✓" : status === "failed" ? "×" : status === "partial" ? "!" : "·";
   return (
-    <section>
-      <div className="section-intro"><div><p className="eyebrow">RUN AUDIT</p><h2>每次扫描都可追踪、可解释</h2><p>记录抓取、过滤、去重和AI提炼数量，便于排查平台连接器状态。</p></div></div>
+    <section className="runs-view">
+      <div className="section-intro"><div><p className="eyebrow">RUN CONTROL</p><h2>运行中心</h2><p>从搜索发现到 AI 入库，每一步都有状态、数量与错误原因。</p></div></div>
       <div className="run-list">
-        {runs.map((run) => (
-          <article className="run-card" key={run.id}>
-            <div className={`run-status ${run.status === "完成" ? "success" : "partial"}`}>{run.status === "完成" ? "✓" : "!"}</div>
-            <div className="run-main"><div><h3>{run.taskName}</h3><span>{new Date(run.startedAt).toLocaleString("zh-CN", { hour12: false })}</span></div><p>{run.message}</p></div>
-            <div className="run-stats"><span>获取<b>{run.fetched}</b></span><span>过滤<b>{run.filtered}</b></span><span>重复<b>{run.deduped}</b></span><span>有效<b>{run.valid}</b></span><span>A级<b>{run.highValue}</b></span></div>
-          </article>
-        ))}
+        {runs.map((run) => {
+          const stats = sourceStats.filter((item) => item.runId === run.id);
+          const runEvents = events.filter((item) => item.runId === run.id).slice().reverse();
+          return (
+            <details className="run-card" key={run.id}>
+              <summary>
+                <div className={`run-status ${statusClass(run.status)}`}>{statusMark(run.status)}</div>
+                <div className="run-main"><div><h3>{run.taskName}</h3><span>{run.statusLabel ?? run.status} · {new Date(run.startedAt).toLocaleString("zh-CN", { hour12: false })}</span></div><p>{run.message || "等待运行事件"}</p></div>
+                <div className="run-stats"><span>发现<b>{run.fetched}</b></span><span>过滤<b>{run.filtered}</b></span><span>重复<b>{run.deduped}</b></span><span>入库<b>{run.valid}</b></span><span>A级<b>{run.highValue}</b></span></div>
+                <i className="run-chevron">⌄</i>
+              </summary>
+              <div className="run-detail">
+                {stats.map((stat) => (
+                  <div className="run-funnel" key={`${stat.runId}-${stat.source}`}>
+                    <div><b>{stat.source}</b><small>{stat.status}</small></div>
+                    <span>发现<strong>{stat.discovered}</strong></span><span>时间过滤<strong>{stat.timeFiltered}</strong></span>
+                    <span>黑名单<strong>{stat.blacklistFiltered}</strong></span><span>广告过滤<strong>{stat.advertisementFiltered}</strong></span>
+                    <span>去重<strong>{stat.deduped}</strong></span><span>匹配<strong>{stat.matched}</strong></span>
+                    <span>AI 分析<strong>{stat.analyzed}</strong></span><span>保留<strong>{stat.kept}</strong></span>
+                    {stat.errorMessage && <p>{stat.errorCode || "source_error"} · {stat.errorMessage}</p>}
+                  </div>
+                ))}
+                <div className="run-timeline">
+                  <b>事件时间线</b>
+                  {runEvents.length ? runEvents.map((event) => (
+                    <div className={`run-event ${event.level}`} key={event.id}>
+                      <time>{new Date(event.createdAt).toLocaleTimeString("zh-CN", { hour12: false })}</time>
+                      <span>{event.source ? `${event.source} · ` : ""}{event.message}</span>
+                      <small>{event.stage}</small>
+                    </div>
+                  )) : <p>本次运行没有额外事件。</p>}
+                </div>
+              </div>
+            </details>
+          );
+        })}
+        {runs.length === 0 && <div className="empty-state"><strong>No runs yet</strong><span>创建并运行一个检索任务后，这里会展示完整执行链路。</span></div>}
       </div>
     </section>
   );
@@ -871,7 +936,6 @@ function SettingsView({ data, onChanged }: { data: AppState; onChanged: () => Pr
       </div>
     </div>
     {section === "sources" ? <SourcesView sources={data.sources} jobs={data.connectorJobs ?? []} onChanged={onChanged} /> : <AiBrainView />}
-    <details className="settings-audit-details"><summary>查看运行记录与技术日志</summary><RunsView runs={data.runs} /></details>
   </section>;
 }
 
@@ -1298,7 +1362,8 @@ function GuideModal({ onClose, onCreate, onNavigate }: { onClose: () => void; on
   );
 }
 
-function LeadDrawer({ lead, onClose, onReview }: { lead: Lead; onClose: () => void; onReview: (status: string) => void }) {
+function LeadDrawer({ lead, onClose, onReview }: { lead: Lead; onClose: () => void; onReview: (status: string, note: string) => void }) {
+  const [note, setNote] = useState(lead.reviewNote ?? "");
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <aside className="lead-drawer" role="dialog" aria-modal="true" aria-label="线索详情">
@@ -1306,12 +1371,13 @@ function LeadDrawer({ lead, onClose, onReview }: { lead: Lead; onClose: () => vo
         <div className="drawer-body">
           <section className="author-block"><span className="author-avatar">{lead.author.slice(0, 1)}</span><div><h3>{lead.author}</h3><p>{lead.source} · {lead.authorId}</p></div><span className="score-large">{lead.score}<small>匹配分</small></span></section>
           <section className="evidence-card"><span>公开原文证据</span><blockquote>“{lead.snippet}”</blockquote><small>{lead.publishedAt}</small></section>
-          <section className="analysis-block"><h3>AI结构化判断</h3><dl><div><dt>线索类型</dt><dd>{lead.intelligenceType}</dd></div><div><dt>求职信号</dt><dd>{lead.intent}</dd></div><div><dt>推荐说明</dt><dd>{lead.companyNote}</dd></div><div><dt>关键证据</dt><dd>{lead.evidence}</dd></div></dl></section>
+          <section className="analysis-block"><h3>AI结构化判断</h3><dl><div><dt>线索类型</dt><dd>{lead.intelligenceType}</dd></div><div><dt>岗位匹配</dt><dd>{safeNumber(lead.jobMatchScore)} / 100</dd></div><div><dt>求职信号</dt><dd>{lead.intent} · {safeNumber(lead.intentScore)} / 100</dd></div><div><dt>企业情报</dt><dd>{safeNumber(lead.intelScore)} / 100</dd></div><div><dt>证据可信</dt><dd>{Math.round(safeNumber(lead.evidenceConfidence) * 100)}%</dd></div><div><dt>推荐说明</dt><dd>{lead.companyNote}</dd></div><div><dt>关键证据</dt><dd>{lead.evidence}</dd></div></dl></section>
           <section><h3>提取标签</h3><div className="tag-row">{lead.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></section>
+          <label className="review-note"><span>人工复核备注</span><textarea value={note} maxLength={2000} onChange={(event) => setNote(event.target.value)} placeholder="记录判断依据、下一步或需要复查的问题" /></label>
           <a className="source-link" href={lead.url} target="_blank" rel="noreferrer">打开原始来源 ↗</a>
           <section className="privacy-note"><b>判断边界</b><p>仅基于公开内容生成辅助线索，不代表作者真实求职意愿。建议猎头人工复核后再决定是否跟进。</p></section>
         </div>
-        <div className="drawer-actions"><button className="reject-button" onClick={() => onReview("误报")}>标记误报</button><button className="confirm-button" onClick={() => onReview("已确认")}>确认并重点跟进</button></div>
+        <div className="drawer-actions"><button className="reject-button" onClick={() => onReview("误报", note)}>误报</button><button className="reject-button" onClick={() => onReview("已忽略", note)}>忽略</button><button className="reject-button" onClick={() => onReview("稍后处理", note)}>稍后处理</button><button className="confirm-button" onClick={() => onReview("已确认", note)}>确认有效</button></div>
       </aside>
     </div>
   );

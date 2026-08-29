@@ -39,6 +39,10 @@ export async function ensureDatabase() {
     ["evidence_confidence", "REAL NOT NULL DEFAULT 0"], ["overall_score", "INTEGER NOT NULL DEFAULT 0"],
     ["review_note", "TEXT NOT NULL DEFAULT ''"], ["reviewed_by", "TEXT NOT NULL DEFAULT ''"], ["reviewed_at", "TEXT"],
   ]);
+  await addMissingColumns("analyses", [
+    ["response_id", "TEXT NOT NULL DEFAULT ''"], ["latency_ms", "INTEGER NOT NULL DEFAULT 0"],
+    ["retry_count", "INTEGER NOT NULL DEFAULT 0"], ["recommended_action", "TEXT NOT NULL DEFAULT 'human_review'"],
+  ]);
 
   let legacyRawTable = "";
   if (await tableExists("raw_items")) {
@@ -131,7 +135,9 @@ export async function ensureDatabase() {
       evidence_confidence REAL NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]',
       evidence_quotes TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '',
       uncertainty TEXT NOT NULL DEFAULT '[]', raw_output TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL, error_code TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      status TEXT NOT NULL, error_code TEXT NOT NULL DEFAULT '', response_id TEXT NOT NULL DEFAULT '',
+      latency_ms INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0,
+      recommended_action TEXT NOT NULL DEFAULT 'human_review', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_analyses_raw_status_created ON analyses(raw_item_id, status, created_at)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS run_source_stats (
@@ -150,6 +156,9 @@ export async function ensureDatabase() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_run_events_run_created ON run_events(run_id, created_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS task_run_locks (
+      task_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS import_batches (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, file_name TEXT NOT NULL DEFAULT '', format TEXT NOT NULL,
       status TEXT NOT NULL, total INTEGER NOT NULL DEFAULT 0, accepted INTEGER NOT NULL DEFAULT 0,

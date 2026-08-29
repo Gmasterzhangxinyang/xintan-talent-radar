@@ -182,6 +182,10 @@ export const analyses = sqliteTable(
     rawOutput: text("raw_output").notNull().default("{}"),
     status: text("status").notNull(),
     errorCode: text("error_code").notNull().default(""),
+    responseId: text("response_id").notNull().default(""),
+    latencyMs: integer("latency_ms").notNull().default(0),
+    retryCount: integer("retry_count").notNull().default(0),
+    recommendedAction: text("recommended_action").notNull().default("human_review"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [index("idx_analyses_raw_status_created").on(table.rawItemId, table.status, table.createdAt)],
@@ -224,6 +228,13 @@ export const runEvents = sqliteTable(
   },
   (table) => [index("idx_run_events_run_created").on(table.runId, table.createdAt)],
 );
+
+export const taskRunLocks = sqliteTable("task_run_locks", {
+  taskId: text("task_id").primaryKey(),
+  runId: text("run_id").notNull(),
+  acquiredAt: text("acquired_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+});
 
 export const importBatches = sqliteTable(
   "import_batches",
